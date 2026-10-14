@@ -1,6 +1,6 @@
-# P4 独立实例使用与实际边界
+# 洄海 0.4.0｜使用手册
 
-本地 Python/HTTP/MCP 共用 `Application`，管理台直接读取同一 API。当前为 P4 隔离实现，Docker 运行验收以阶段报告为准；P5 公开发布与 P6 生产接入尚未授权。
+本地 Python/HTTP/MCP 共用 `Application`，管理台直接读取同一 API。0.4.0 已完成独立实例验收并公开源码与版本标签；真实 Agent 自动模型管线和念念生产接入仍待完成。
 
 ## 快速启动
 
@@ -25,7 +25,7 @@ docker compose -f deploy/compose.yaml up --build -d
 docker compose -f deploy/compose.yaml logs --tail 30
 ```
 
-默认仅发布宿主 `127.0.0.1:8765`，命名卷与念念完全隔离。健康检查为 `/health`；API 需要认证。容器内部 `--container` 显式绑定 `0.0.0.0`，不改变 Compose 的宿主绑定。云端模型 Key 默认不传入；确需启用时自行将对应环境变量加入容器 environment。P4 已用隔离临时 Compose project 完成新空镜像构建与容器健康/API/原文/记忆操作验收并清理；这不是生产部署或公开发布验收。
+默认仅发布宿主 `127.0.0.1:8765`，命名卷与念念完全隔离。健康检查为 `/health`；API 需要认证。容器内部 `--container` 显式绑定 `0.0.0.0`，不改变 Compose 的宿主绑定。云端模型 Key 默认不传入；确需启用时自行将对应环境变量加入容器 environment。已用隔离临时 Compose project 完成新空镜像构建与容器健康/API/原文/记忆操作验收并清理；该验证不代表念念生产接入。
 
 ## Python / HTTP / MCP
 

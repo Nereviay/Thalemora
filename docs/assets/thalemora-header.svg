@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 300" role="img" aria-labelledby="title desc">
+  <title id="title">Thalemora · 洄海</title>
+  <desc id="desc">深蓝色水面与层叠波纹，象征有出处的记忆和延续的经历。</desc>
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#0b1527"/><stop offset=".55" stop-color="#102945"/><stop offset="1" stop-color="#153c63"/>
+    </linearGradient>
+    <radialGradient id="light" cx=".86" cy=".6" r=".65">
+      <stop stop-color="#56a8e8" stop-opacity=".19"/><stop offset="1" stop-color="#56a8e8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ripple" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#71a4ce" stop-opacity="0"/><stop offset=".58" stop-color="#9dd6ff" stop-opacity=".48"/><stop offset="1" stop-color="#8bc7f3" stop-opacity=".12"/>
+    </linearGradient>
+    <clipPath id="frame"><rect width="1280" height="300" rx="20"/></clipPath>
+  </defs>
+  <g clip-path="url(#frame)">
+    <rect width="1280" height="300" fill="url(#surface)"/>
+    <rect width="1280" height="300" fill="url(#light)"/>
+    <g fill="none" stroke="url(#ripple)" stroke-width="1.3">
+      <path d="M400 254 C610 300 688 89 914 125 S1112 259 1360 178"/>
+      <path d="M387 271 C604 316 702 108 926 144 S1128 280 1373 197"/>
+      <path d="M372 288 C596 332 716 127 938 163 S1144 301 1386 216"/>
+      <path d="M357 305 C588 348 730 146 950 182 S1160 322 1399 235"/>
+      <path d="M342 322 C580 364 744 165 962 201 S1176 343 1412 254"/>
+      <path d="M327 339 C572 380 758 184 974 220 S1192 364 1425 273"/>
+    </g>
+    <circle cx="1028" cy="93" r="40" fill="none" stroke="#b4dcff" stroke-opacity=".2"/>
+    <circle cx="1028" cy="93" r="29" fill="none" stroke="#b4dcff" stroke-opacity=".12"/>
+    <circle cx="1028" cy="93" r="4" fill="#c7e7ff" fill-opacity=".7"/>
+    <text x="70" y="150" fill="#f1f7ff" font-family="Georgia, 'Times New Roman', serif" font-size="76" letter-spacing="1">Thalemora</text>
+    <text x="74" y="207" fill="#8eaac5" font-family="sans-serif" font-size="14" letter-spacing="3.5">MEMORY &amp; CONTINUITY</text>
+  </g>
+</svg>
