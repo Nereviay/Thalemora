@@ -4,7 +4,7 @@
 
 面向 AI Agent 的记忆与连续性系统，源自念念的长期运行实践。把原始对话、长期记忆与自我认识连起来，让记忆有出处、变化有依据、跨应用有延续。
 
-> **当前进度：设计已定稿，P0 只读审计进行中。** 现有能力正在准备独立提取，尚无可安装的洄海版本。下列内容是已确认的产品设计。
+> **首版功能范围（0.4.0）**：Python/HTTP/MCP、中文 Web、无 Key 原文检索与停写恢复已完成隔离验收；Docker 空实例健康、认证、导入、检索、人工记忆操作和许可文件均有实测。真实 Agent 接线、自动模型提炼和念念生产迁移不属于已完成的首版能力；下列产品范围包含后续目标。
 
 ## 洄海关注什么
 
@@ -43,15 +43,81 @@ flowchart TD
 
 ## 当前进度
 
-- **已完成**：产品设计、施工路线与中文项目说明。
-- **正在推进**：P0 只读审计与提取准备。
-- **下一阶段**：提取现有核心实现，完成隔离测试与独立运行验证。
+- **已完成**：P1 七领域核心，P2 多 Agent 身份／授权历史档案／可信增量协议，P3 的 Self Model 宿主授权适配、11 维 Emotion、Diary／Dream／Whisper、Reflection 建议、有限 Continuity 候选和 Persona 版本／epoch 绑定。全部为隔离开发与合成验收；P0 历史缺口原样保留。
+- **P4 已验收的隔离交付**：统一应用服务、受 token 认证的本地 HTTP、官方 MCP stdio、分页中文 Web、离线原文检索、人工 Memory 证据和 Water 操作、内在状态浏览、显式 Provider 请求及独立预算审计、Python wheel 安装与停写快照恢复。具体已接线范围见 [使用说明](docs/P4_USAGE.md)。
+- **尚未验收/接线**：真实 Agent/生产证据适配、自动 Writer/Gatekeeper/Reflection 模型管线、真实模型效果与费用账单、真实数据迁移及生产接入。P4 已归档，公开发布和念念生产切换需分别验收。
 
-主要部署方式计划采用 Docker Compose。安装命令、接口示例与已支持清单随真实交付更新；独立公开发布和念念生产接入分别验收。
+## P4 本地试用
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -c requirements.lock .
+export THALEMORA_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+thalemora --data ./state serve
+```
+
+打开 `http://127.0.0.1:8765`，使用刚生成的管理 token，注册 Agent 并显式授权来源/通道。无模型 Key 即可导入 [合成示例](docs/examples/p4_history.json)、浏览与检索。模型默认关闭，无启动下载或后台付费调用。Docker 配置、API/MCP/Python、实际能力限制与全量导出/恢复见 [使用手册](docs/P4_USAGE.md)。
+
+## 隔离 Python 核心的使用边界
+
+领域核心可从项目目录设置 `PYTHONPATH=src` 使用，也可安装后通过 `Application` 接线；仅运行 `thalemora serve/mcp` 才启动相应入口，没有定时任务或隐式模型调用。`IdentityRegistry` 由宿主配置本地根目录；`OwnerPrincipal`、角色和证据 reader 必须来自可信宿主，不能从外部请求的 `actor` 等字段构造。
+
+以下为纯合成的本地基础管理示例，无需连接 Agent：
+
+```python
+from thalemora.identity.registry import IdentityRegistry, OwnerPrincipal
+from thalemora.inner_world.host import HostSession
+from thalemora.inner_world.store import InnerStore
+from thalemora.persona import Persona
+from thalemora.diary import Diary
+
+registry = IdentityRegistry("./local-state")
+owner = OwnerPrincipal("synthetic-owner")  # 实际宿主须使用认证结果
+agent = registry.register_agent(owner, "合成 Agent")
+registry.grant_source(owner, agent.agent_id, "demo-app", "main")
+session = HostSession(registry, owner, agent.agent_id, "demo-app")
+states = InnerStore(session)
+Persona(states).configure(
+    authority="managed", expected_version=0, content="合成独立 Agent 配置",
+    reason="首次配置", recorded_at="2026-10-14T00:00:00+00:00",
+)
+page = Diary(states).list(limit=20)
+```
+
+本人创作接收宿主已保存的事件引用。`HostReader` 继承既有 `VerifiedEvidenceSource`：按稳定 Agent ID 提供 generation、来源记录与引用，再提供事件的 app/channel/领域/context 和真实 epoch 确认。正文、工具参数、作者、生成身份和 event time 均从该独立来源读取。`tests/test_p3_inner_world.py` 提供实际 SQLite 合成宿主，不连接生产。
+
+宿主确认本人调用后，Self Model 的接法如下；这里的 owner、角色、reader 均是宿主内部依赖，外部请求只能提供待核验的事件引用：
+
+```python
+from thalemora.self_model.host import HostedSelfModel
+
+def apply_completed_agent_event(registry, owner, agent_id, verified_host_reader, event_ref):
+    session = HostSession(
+        registry, owner, agent_id, "demo-app", role="agent", reader=verified_host_reader,
+    )
+    model = HostedSelfModel(session)
+    try:
+        return model.apply(event_ref)  # 原 Self Model Gate 的最终 receipt
+    finally:
+        model.close()
+```
+
+Diary/Dream/Whisper 的 `publish(ref)` 同样只接受已完成的本人事件；维护器只能 `import_event(ref)` 导入已核证的本人历史，不能自报正文。Whisper 需要另行授予 `private`，main 授权不会覆盖 private。没有事件 reader 的 Agent 自主调用明确返回“需连接 Agent”；已有状态仍可按页查询、回放和撤销。
+
+Emotion 保存完整 11 维 mood 快照，不执行生成或漂移。Reflection 只记录建议及 reviewed/dismissed 状态，不改正式 Memory、Self Model 或 Persona。Continuity 只从显式指定的至多 20 条已保存状态生成带已确认 epoch 的候选，不投递 Provider、不创建聊天或 epoch；梦境不作为现实连续性来源。Persona 的 managed/external 每次只有一个当前权威，念念接入时应配置 external 引用与外部版本，正式 Prompt 仍由念念持有；已绑定 epoch 始终读取原版本。
+
+上述 Python 入口是可信宿主内部接口；P4 已增加 HTTP/MCP 与控制台接线，安装发布仍受独立 Gate 约束。Self Model 冻结与 Continuity 构建须显式由宿主触发；分页读取不触发反思、模型调用或全历史扫描。
 
 ## 开源许可
 
-采用 [Apache License 2.0](LICENSE)。
+洄海首版源码采用 [Apache License 2.0](LICENSE)；所参考的 Ombre Brain 原作者 MIT 版权文本、Yinglianchun 二改贡献，以及必要的第三方依赖许可与来源说明见 [第三方声明](THIRD_PARTY_NOTICES.md)。锁定依赖保留其各自的许可证，不因与本项目组合安装而改为 Apache-2.0。
+
+## 技术参考
+
+洄海的记忆设计有明确的参考来源：早期重点借鉴了 [Yinglianchun/Ombre-Brain](https://github.com/Yinglianchun/Ombre-Brain) 对 [Ombre Brain 原项目](https://github.com/P0luz/Ombre-Brain) 的第三方二次开发；**这份二改不是洄海开发者自行完成的**。后续念念记忆系统在这些公开实现与自身需求基础上持续演进，例如先利用 embedding 获取记忆候选，再以 rerank 结合当前语境筛选。也参考了 [Serein](https://github.com/Yinglianchun/Serein)、[Haven-Ombre](https://github.com/Yinglianchun/Haven-Ombre)、[Paramecium](https://github.com/Shitsuten/paramecium) 及 [awesome-ai-companion](https://github.com/DasterProkio/awesome-ai-companion) 收录的相关研究与开源实践。感谢这些项目及其开发者。
+
+这些说明的是设计传承与参考关系，不意味着洄海整体是 Ombre Brain 的代码 fork。但生命周期评分中的三天分段时间/情绪加权规则与 Yinglianchun 二改版及其上游 Ombre Brain 的代码一致，我们明确将其归为继承设计，并在 [第三方来源与 MIT 声明](THIRD_PARTY_NOTICES.md) 中保留原作者版权。其他实际代码复用如有新证据，继续单独标明。
 
 ## 协作与致谢
 

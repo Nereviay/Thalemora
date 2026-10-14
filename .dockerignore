@@ -1,0 +1,10 @@
+*
+!pyproject.toml
+!requirements.lock
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!src/
+!src/**
+**/__pycache__
+**/*.pyc
+**/*.sqlite

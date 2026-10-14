@@ -1,0 +1,14 @@
+services:
+  thalemora:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "127.0.0.1:${THALEMORA_PORT:-8765}:8765"
+    environment:
+      THALEMORA_TOKEN: ${THALEMORA_TOKEN:?请先设置本地管理 token}
+      THALEMORA_DATA: /data
+    volumes:
+      - thalemora_data:/data
+volumes:
+  thalemora_data:

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>洄海 · 记忆与连续性</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <header>
+      <a href="/" class="brand">洄海 <span>THALEMORA</span></a
+      ><span class="tag">本地记忆与连续性</span>
+    </header>
+    <section id="login" class="login">
+      <h1>打开你的记忆档案</h1>
+      <p>
+        使用此实例的管理 token。模型默认关闭，历史浏览与原文检索可离线使用。
+      </p>
+      <form id="loginForm">
+        <label
+          >管理 token<input
+            id="token"
+            type="password"
+            autocomplete="off"
+            required /></label
+        ><button>连接本地实例</button>
+      </form>
+    </section>
+    <div id="workspace" hidden>
+      <aside>
+        <label
+          >当前 Agent<select id="agent" aria-label="当前 Agent"></select
+        ></label>
+        <div class="agent-page">
+          <button id="agentPrev">上一批</button
+          ><button id="agentNext">下一批</button>
+        </div>
+        <form id="agentForm">
+          <label
+            >注册 Agent<input
+              id="agentName"
+              placeholder="显示名称"
+              required
+              maxlength="100" /></label
+          ><button>注册</button>
+        </form>
+        <nav id="nav" aria-label="领域导航"></nav>
+        <button id="logout" class="quiet">断开连接</button>
+      </aside>
+      <main>
+        <section class="scope">
+          <label
+            >来源应用<input id="appId" value="demo-app" maxlength="100"
+          /></label>
+          <label
+            >通道<select id="channel">
+              <option value="main">main · 主通道</option>
+              <option value="private">private · 私有通道</option>
+            </select></label
+          >
+          <button id="grant">授权此来源/通道</button
+          ><button id="refresh" class="quiet">刷新</button>
+        </section>
+        <div class="heading">
+          <div>
+            <p class="eyebrow">
+              记忆与连续性 / <span id="scopeLabel">当前授权域</span>
+            </p>
+            <h1 id="title">历史档案</h1>
+          </div>
+          <span id="count" class="muted"></span>
+        </div>
+        <section id="tools"></section>
+        <section id="content" aria-label="当前数据"></section>
+        <footer id="pager">
+          <button id="prev" class="quiet">上一页</button
+          ><span id="pageLabel"></span
+          ><button id="next" class="quiet">下一页</button>
+        </footer>
+      </main>
+    </div>
+    <p id="notice" role="status" aria-live="polite"></p>
+    <dialog id="detail">
+      <button id="closeDetail" class="quiet">关闭</button>
+      <h2>记录与来源</h2>
+      <pre id="detailBody"></pre>
+    </dialog>
+  </body>
+</html>

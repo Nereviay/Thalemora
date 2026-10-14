@@ -1,0 +1,4 @@
+[
+  {"app":"demo-app","channel":"main","source_event_id":"synthetic-001","version":1,"role":"user","text":"纯合成示例：我想整理一次旅行计划。","occurred_at":"2026-10-14T10:00:00+08:00","conversation_id":"synthetic-conversation","epoch_id":null,"content_hash":null,"deleted":false,"hash_verification":"unknown","raw_event_id":null},
+  {"app":"demo-app","channel":"main","source_event_id":"synthetic-002","version":1,"role":"assistant","text":"纯合成回复：先记录行程与待确认事项。","occurred_at":"2026-10-14T10:01:00+08:00","conversation_id":"synthetic-conversation","epoch_id":null,"content_hash":null,"deleted":false,"hash_verification":"unknown","raw_event_id":null}
+]
