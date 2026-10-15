@@ -2,3 +2,4 @@ include README.md LICENSE THIRD_PARTY_NOTICES.md requirements.lock
 recursive-include docs *.md *.svg *.png *.json
 recursive-include deploy *.yaml Dockerfile
 recursive-include src/thalemora/app/static *.html *.js *.css
+recursive-include tools *.py

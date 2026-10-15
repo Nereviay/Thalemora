@@ -1,6 +1,6 @@
-# 念念接入：隔离宿主与历史同步
+# 念念接入：宿主适配与历史同步
 
-当前已验证范围：P6-2 存储兼容、P6-3 隔离宿主接线/完整变更源及无付费基线；不是生产切换许可。
+本项目已有念念生产接入案例：沿用公共核心、保留原有身份与宿主权威，完成隔离预演、有限真实对照和经批准的正式切换。下述工具不自动给予其他部署切换许可，独立使用不需要执行这些迁移工具。
 
 ## 路线
 
@@ -33,12 +33,12 @@ PYTHONPATH=src python3 tools/niannian_storage_rehearsal.py rehearse NEW_SNAPSHOT
 - `adapters/niannian_history.install(connection)`：显式安装 canonical 事务内 feed。
 - `adapters/niannian_raw_feed.install_raw(connection)`：显式安装 RawEvent feed。
 - 两个安装动作会修改源 schema，只能在隔离副本或生产 Gate 明确授权后执行。安装时各自事务回填当前快照，不伪造历史修订。
-- `tools/niannian_history_sync.py`：后台单次有界消费，复用持久游标，不安装 feed、不调用模型；调度仍由宿主管理，未部署常驻任务。
+- tools/niannian_history_sync.py：后台单次有界消费，复用持久游标，不安装 feed、不调用模型；生产案例由既有宿主按分钟调度，独立包不自行注册系统任务。
 - 事件覆盖新增/编辑/替换/软删除与恢复/物理清除；main 转 private 会撤销普通档案；canonical 和 RawEvent 来源投影并列留存，不能相加当唯一聊天数。
 - 旧 chenlin_mcp / chenlin_explicit 与 Water proposer 保留，人工卡只读参与关系判断；不批量重写旧来源。
 
-## 尚未验证的生产 Gate
+## 已验案例与持续边界
 
-真实模型回复首字/总时延、Token/缓存/费用及质量、在线持续同步、跨库冻结/最终追赶、唯一写入权和保全切后新增的回退均未验。两个合成 VNext 输入仅证明局部结果相同，不代表真实全场景质量/性能。
+已完成案例的隔离存储/宿主接线、冻结/增量追赶、唯一写入权、恢复与有界真实模型对照。完整长上下文缓存、所有场景时延/成本与长期质量仍依赖自然使用观察，不冒称全面不退步。
 
-原始档案副本和宿主 delta 仅留本服务器私有目录，不进入公共包。6 项依赖完整 heartbeat 的未修改 exposure 测试未计 PASS；实际生产接入前按精确部署影响决定验收范围。旧未知 evidence/hash 保留未知，生产切换仍需独立批准。
+原始档案副本和宿主 delta 仅留本服务器私有目录，不进入公共包。6 项依赖完整 heartbeat 的未修改 exposure 测试未计 PASS；其他宿主接入前按精确部署影响决定验收范围。旧未知 evidence/hash 保留未知，生产切换仍需独立批准。

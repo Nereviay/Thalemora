@@ -7,7 +7,7 @@
 源自念念长期运行实践的 **AI 记忆与连续性系统**。<br>
 连接原话证据、可修订的长期记忆与身份状态，让每一次回忆有出处。
 
-[![Version](https://img.shields.io/badge/version-0.5.0-2563eb?style=flat-square)](https://github.com/yuyu1838309000-cmd/Thalemora/tree/v0.5.0)
+[![Version](https://img.shields.io/badge/version-0.6.0-2563eb?style=flat-square)](https://github.com/yuyu1838309000-cmd/Thalemora/tree/v0.6.0)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-334155?style=flat-square)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-334155?style=flat-square)](LICENSE)
 
@@ -28,18 +28,18 @@
 | **多 Agent 与跨应用** | 隔离身份、数据与检索；同一 Agent 的应用来源经过授权后可以共享档案。 |
 | **本地优先** | 无模型 Key 可导入、浏览、原话检索和人工管理记忆；云端模型按用途配置，付费调用默认关闭。 |
 
-### 0.5.0 可以做什么
+### 0.6.0 可以做什么
 
-- **独立运行**：中文 Web 管理台、Python、HTTP、MCP，以及 Docker Compose。
-- **管理与检索**：历史导入、原话搜索、人工 Memory / Water 操作、内在状态浏览和人格配置。
-- **保存与恢复**：全量历史导入导出、停止写入后的实例快照与恢复、Provider 配置及调用用量审计。
-- **宿主集成**：Scene、Gatekeeper、生命周期及 Self Model 等领域核心可由 Python 接入。
-- **MCP 九工具**：同一服务的 Streamable HTTP `/mcp`（Bearer 管理密钥）与原有 stdio，支持原话与 Memory 读取、来源导入、明确的人工记忆和修订。
-- **实验性维护入口**：Python 宿主显式调用 `maintenance_tick` 可用合成 Provider 验证 Scene-first Writer → Gatekeeper → Memory → Reflection 的可恢复流程；**尚不支持真实模型后台无人值守自动整理**。
+- **独立运行**：中文 Web 管理台、Python、HTTP、九工具 MCP，以及 Docker Compose。
+- **原话与人工记忆**：授权历史导入、检索、Memory / Water、修订链与来源证据。
+- **后台自动整理**：按用途配置模型后，独立 worker 串行运行 Scene-first Writer → Gatekeeper → Memory → Reflection；前台回复无需等待维护模型。
+- **人工优先与可追溯**：人工卡参与关系判断但保持只读，同条冲突不平行复制；Writer 区分事实、当次指令与长期偏好。
+- **预算与恢复**：默认不调用模型；调用次数/实际 usage 审计、持久进度、重启去重、明确失败后退出；全量历史与停写快照可导出恢复。
+- **宿主接入**：提供念念存储、历史增量和可信 Self Model 适配；普通独立使用不需要安装念念。
 
-真实模型 Writer / Gatekeeper / Reflection、无人值守调度、正式 Agent 事件接线与念念生产迁移仍未完成。显式合成维护入口见 [PRE6-4 用法](docs/PRE6_4_USAGE.md)；本地向量检索仍需 Python 宿主提供 embedder。参见 [使用手册](docs/P4_USAGE.md)。
+自动整理的配置、启动和费用边界见 [后台记忆使用说明](docs/PRE6_4B_USAGE.md)。无 Key 时仍可导入、检索和人工管理。Agent 本人创作与自我修订仍需可信宿主事件，本地向量检索需宿主提供 embedder；这些能力不由 worker 假冒。
 
-**本地候选 0.6.0.dev1 / PRE6-4B（尚未发布）**：已补真实模型协议适配与独立后台 worker，复用用途配置/预算/用量审计，前台导入与检索不等待维护模型。DeepSeek Flash 小测暴露的人工卡平行冲突与 Writer 管理指令候选已修复：36 项合成验收和 6 次定向真实复验通过。新功能仍未发布/部署，念念未接入；这不是全量真实质量或规模基准。[开发用法](docs/PRE6_4B_USAGE.md)
+有限真实模型小测和念念接入已验；独立 worker 另以本地假模型验证后台进程、持久化和重启去重，不把这些证据写成所有模型/设备的质量、长期稳定或性能保证。Windows 原生 Python 与 Linux Docker 的 v0.5.0 首装已补验，手机独立首装与长时后台仍暂缓。
 
 ### 数据如何连接
 
@@ -62,7 +62,7 @@ flowchart TD
 需要 **Python 3.10+**。首次启动无需模型 Key。
 
 ```bash
-git clone --depth 1 --branch v0.5.0 https://github.com/yuyu1838309000-cmd/Thalemora.git
+git clone --depth 1 --branch v0.6.0 https://github.com/yuyu1838309000-cmd/Thalemora.git
 cd Thalemora
 
 python3 -m venv .venv

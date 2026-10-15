@@ -1,12 +1,12 @@
 # Windows 安装洄海：第一次使用指南
 
-**适用**：Windows 10/11 用户。**验证程度**：命令依据 v0.5.0 候选的 Python/Compose 安装合同编写，Linux/Docker 已验；**还没有在 Windows 原生系统完成一轮从零安装到浏览器操作的实测**。如果报错，请按原样记录文字供后续修订，不要把本页当作已全版本验证的“一键安装”。
+**适用**：Windows 10/11 用户。**验证程度**：v0.5.0 已在一台 Windows 电脑以独立 Python 3.12.10/venv 完成安装、Edge 管理台、关闭重开与停写备份。v0.6.0 沿用安装方式，新增 worker 另在 Linux 隔离验收；不把前次结果扩大为本版所有 Windows 环境或 Docker Desktop 均已验证。
 
 ## 路线 A：用 Python 安装（不必先学 Docker）
 
 你需要安装一次 [Python 3.12（Python 官网）](https://www.python.org/downloads/windows/)，以及下载洄海源码。第一次安装时需要联网，后续本地原话检索不需要模型 API。
 
-1. **确认 GitHub 已发布 v0.5.0 后**，打开 [Thalemora v0.5.0 源码页面](https://github.com/yuyu1838309000-cmd/Thalemora/tree/v0.5.0)，点击 **Code → Download ZIP**，把压缩包解压到一个你记得住的文件夹，例如桌面。不要直接在压缩包里运行。
+1. 打开 [Thalemora v0.6.0 源码页面](https://github.com/yuyu1838309000-cmd/Thalemora/tree/v0.6.0)，点击 **Code → Download ZIP**，把压缩包解压到一个你记得住的文件夹，例如桌面。不要直接在压缩包里运行。
 2. 在这个解压文件夹中，点击文件管理器的地址栏，输入 `powershell` 并按回车。此时出现的蓝色或黑色窗口叫“终端”，后面只需要复制命令。
 3. 先检查 Python 安装好了没有：
 
@@ -51,7 +51,7 @@
 Docker 可以把 Python 依赖放进隔离容器，但**如果还没有 Docker，先安装 Docker Desktop/WSL2 也可能很费时**。不要仅为了“省步骤”盲目选择它。[Docker Desktop Windows 官方安装文档](https://docs.docker.com/desktop/setup/install/windows-install/)
 
 1. 打开并启动 Docker Desktop，确认显示 Docker Engine 正在运行。
-2. 下载并解压同一个 v0.5.0 ZIP，进入解压目录打开 PowerShell。
+2. 下载并解压同一个 v0.6.0 ZIP，进入解压目录打开 PowerShell。
 3. 检查 Docker：
 
    ```powershell
@@ -79,4 +79,4 @@ Docker 可以把 Python 依赖放进隔离容器，但**如果还没有 Docker�
 | Docker Engine 无法启动 | 先按 Docker 官方说明检查 WSL2/虚拟化与当前 Windows 版本；这不是洄海服务已经启动 |
 | 网页显示 401 / 无法访问 | 核对服务终端是否仍在运行、端口 8765 是否冲突、密钥是否与本次启动相同 |
 
-这两条 Windows 路线均尚未完成真机全流程验收。我们已把 **Python 安装、首次依赖下载、管理密钥保存、Docker 前置安装和对终端的依赖**列进 [安装简化待办](INSTALL_FRICTION.md)，后续可据真实失败做安装向导或自动脚本，而不是要求每个用户都去学命令行。
+Python 路线已有上述本机证据，Windows Docker 路线仍待实测。Python 安装、管理密钥保存和终端操作等摩擦保留在 [安装简化待办](INSTALL_FRICTION.md)，本轮不新增安装器或更改系统脚本策略。

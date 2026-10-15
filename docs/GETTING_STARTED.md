@@ -2,13 +2,13 @@
 
 > 适合第一次接触这类工具的用户。先看你手上有什么设备，再按对应教程操作。不需要购买模型 API，也不需要把真实聊天导入做测试。
 
-**版本提醒**：**v0.4.0** 是旧的基础公开版（仅四项 stdio MCP）。本教程按**拟发布的 v0.5.0** 编写：新增 Streamable HTTP 九工具与仅用于合成 Provider 的显式维护入口；请先到 [GitHub Releases](https://github.com/yuyu1838309000-cmd/Thalemora/releases) 确认 **v0.5.0 已正式发布**，再使用新版本安装命令。尚无独立 Android 安装包或“一键安装”，手机纯独立首装尚未验收。
+**版本提醒**：当前为 v0.6.0，含 HTTP MCP 九工具与可配置的独立后台记忆 worker。首次浏览、导入与人工管理无需模型 Key；自动整理需另行配置并启动 worker。尚无独立 Android 安装包或一键安装，手机独立首装尚未验收。
 
 ## 1. 我应该选哪条路线？
 
 | 你有什么 | 从哪里开始 | 目前的实际情况 |
 | --- | --- | --- |
-| Windows 电脑 | [Windows 教程](INSTALL_WINDOWS.md) | 提供可照做的 Python 路线和 Docker 备选；**尚未取得 Windows 完整首装验收** |
+| Windows 电脑 | [Windows 教程](INSTALL_WINDOWS.md) | Python 路线已在一台 Windows 电脑隔离首装与浏览器操作验证；Windows Docker Desktop 未测 |
 | Linux 电脑或自己的 Linux 服务器 | [Linux 教程](INSTALL_LINUX.md) | Python/Compose 路线在独立 Linux 环境验收过；陌生机器仍需自己安装依赖 |
 | 只有 Android 手机，并使用 RikkaHub | [手机教程](INSTALL_ANDROID.md) | Android 17 真机曾完成试装、九工具连接；**当前公开版暂不支持这套 HTTP MCP 安装** |
 | iPhone / iPad | 暂无可验证的本机安装方法 | 没有通过的 iOS 本地运行方案；不要照抄 Android 命令 |

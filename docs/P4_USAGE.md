@@ -1,10 +1,10 @@
-# 洄海 0.5.0 候选｜使用手册
+# 洄海 0.6.0｜使用手册
 
 **第一次使用、不熟悉命令行？** 请先阅读 [零基础安装与第一条记忆](GETTING_STARTED.md)。[Windows](INSTALL_WINDOWS.md) · [Linux](INSTALL_LINUX.md) · [Android 手机试装（待增量版本发布）](INSTALL_ANDROID.md) · [安装难点与后续优化](INSTALL_FRICTION.md)。本页主要是 API 和运维参数，不要求普通用户从头读完。
 
-**版本界限**：旧版 `v0.4.0` 仅有 **4 项 stdio MCP 读取工具**；拟发布的 `v0.5.0` 增加受保护的 `/mcp` Streamable HTTP 和九项工具。请从 GitHub Releases 确认版本真实存在后安装。PRE6-4 的 Writer/Gatekeeper/Reflection 仅提供显式**合成** tick，见 [候选用法](PRE6_4_USAGE.md)；真实模型后台自动整理和念念生产接入均未完成。
+**版本界限**：v0.4.0 提供四项 stdio 读取工具，v0.5.0 增加 HTTP MCP 九工具与合成维护，v0.6.0 增加真实模型协议适配、独立 worker 和念念适配。后台配置与启动见 [自动记忆](PRE6_4B_USAGE.md)，合成入口仍保留。
 
-本地 Python/HTTP/MCP 共用 `Application`，管理台直接读取同一 API。v0.4.0 既有独立实例曾通过公开 Gate；v0.5.0 新功能及文档单独验收，未获发布前仅属于候选。
+本地 Python/HTTP/MCP 共用 Application，管理台直接读取同一 API。worker 是共享同一数据目录的独立后台进程，不新增 Agent Runtime 或第二套配置权威。
 
 ## 快速启动
 
@@ -148,7 +148,7 @@ Memory 是原文人工入库与版本证据，Water 支持 Lake/Stream/Branch、
 
 Provider 配置按 `embedding/writer/gatekeeper/reflection` 各自持久保存 `base_url/model/key_env/capability/enabled/call_budget/token_budget`。Key 在服务器环境变量中，不写入配置或回包。初始 `unconfigured`；Key/URL/model 齐全但未开为 `disabled`；能力与用途不符为 `unsupported`；调用失败为 `error`；可调用为 `ready`。配置后须显式 `call_provider(module,text,max_tokens=128)` 才请求 `/embeddings` 或 `/chat/completions`。
 
-**这些用途目前是显式 Provider 请求接口，未接入自动 Writer/Gatekeeper/Reflection 领域管线。** 调用结果只回给操作者，不自动写 Memory、反思或 Self Model。HTTP 支持配置与测试调用，本地 embedding 另由 Python 注入；不声称拥有自动提炼或云端向量同步。
+**模型接线**：显式 call_provider 只返回供应商结果；配置后的独立 worker 则将 Writer/Gatekeeper/Reflection 接入领域管线并记录持久回执。默认不开启、启动 Web 不自动运行维护。Reflection 只提建议，不修改 Self Model 或 Persona。
 
 调用预算为累计上限，事务预占 pending 及失败调用，防止并发突破调用次数。token 预算为已返回真实累计 token 的准入阈值，达到后阻止下一次；单次请求的总输入 token 由 Provider 决定，因此可能在最后一次调用越过阈值。错误/未返回 usage 的 token 为未知，不以字符数估算实际用量。费用未提供统一可信账单接口，`actual_cost` 始终为 `null`。日志保留失败类型及预算阻止，不保存输入/Key。预算独立于各 Agent，作用域是单用户实例的用途模块。
 
@@ -156,7 +156,7 @@ Provider 配置按 `embedding/writer/gatekeeper/reflection` 各自持久保存 `
 
 HTTP 不接受用户自报的角色/已完成事件，不提供自主创作入口。可信 Python 宿主注入 `host_reader` 后可调用 `publish`；原 P3 `verified_event`、Self Model Gate 与 epoch 确认决定结果。Emotion、Diary、Dream、Whisper、Self Model 本人语义不由维护器生成。Continuity 只构造显式已保存来源的候选，不接管 Runtime 或 Prompt。Persona 仅配置单权威，不注入念念。
 
-Scene、Gatekeeper 自动判定、生命周期批处理尚未接到本应用 API；它们依赖调用方的候选、计划、事务与模型协议，仍可直接使用 P1 Python 核心。P4 没有伪造对应空接口。真实 Agent 的持久证据 reader 与 Runtime 绑定属于之后另行授权的接入工作。
+Scene 与 Gatekeeper 可由独立 worker 在后台驱动，生命周期批处理仍由 Python 宿主按需接入。可信 Agent reader/Runtime 绑定由宿主管理；念念已按自己的生产 Gate 接入，不代表任意外部应用可以自报身份或免验收切权。
 
 ## 全量历史导出与恢复
 

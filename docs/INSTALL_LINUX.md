@@ -13,10 +13,10 @@
 
    若提示“command not found”，先通过你使用的 Linux 发行版安装相应软件。Ubuntu/Debian 常见命令：`sudo apt update && sudo apt install -y python3 python3-venv python3-pip git`。
 
-2. 在 GitHub Releases **确认已发布**后下载 v0.5.0 源码，并进入项目目录：
+2. 在 GitHub Releases 下载 v0.6.0 源码，并进入项目目录：
 
    ```bash
-   git clone --depth 1 --branch v0.5.0 https://github.com/yuyu1838309000-cmd/Thalemora.git
+   git clone --depth 1 --branch v0.6.0 https://github.com/yuyu1838309000-cmd/Thalemora.git
    cd Thalemora
    ```
 
@@ -42,7 +42,7 @@
 
 适合熟悉容器的用户。如果还没有 Docker，首次安装 Docker 本身是一道技术门槛。
 
-1. 和路线 A 一样，用 `git clone` 下载 v0.5.0。
+1. 和路线 A 一样，用 `git clone` 下载 v0.6.0。
 2. 确认 `docker compose version` 有输出。
 3. 在项目目录执行：
 
@@ -73,4 +73,4 @@ Python 路线先停止运行中的所有洄海服务，在项目目录执行：
 
 之后用 `./.venv/bin/thalemora --data ./restored serve` 启动。**恢复不包括环境变量里的管理密钥或模型 API Key**。Docker 卷的备份不能直接照抄 `./state` 命令；需要在停止写入、确认卷对应实际数据路径后按 [完整备份说明](P4_USAGE.md#全量历史导出与恢复) 处理，不能用删除卷代替备份。
 
-**下一步**：按 [普通用户入门](GETTING_STARTED.md) 导入合成数据；如需 HTTP MCP 和自动维护，请注意 [旧版 v0.4.0 与 v0.5.0 的差别](GETTING_STARTED.md#第一次使用洄海从安装到看到第一条记忆)。
+**下一步**：按 [普通用户入门](GETTING_STARTED.md) 导入合成数据；如需 HTTP MCP 和自动维护，请注意 [旧版 v0.4.0 与 v0.6.0 的差别](GETTING_STARTED.md#第一次使用洄海从安装到看到第一条记忆)。
