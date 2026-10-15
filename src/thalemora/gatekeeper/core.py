@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
+from functools import partial
 
 from thalemora.memory import revision_store, evidence_resolver
 from . import keywords as keyword_policy
@@ -379,14 +380,20 @@ def _csv_union(old_value, new_value, *, title="", tags=""):
 
 def _commit(decision, core, frozen_map, *, memory_db_path, candidate_id,
             source, origin, evidence_source_kind, evidence_source_ref,
-            evidence_rows=None, embedding_provider=None, embedding_model=None):
+            evidence_rows=None, embedding_provider=None, embedding_model=None,
+            connection=None):
+    create_card = (partial(revision_store.create_card_in_transaction, connection)
+                   if connection is not None else partial(revision_store.create_card, memory_db_path))
+    update_card = (partial(revision_store.update_card_in_transaction, connection)
+                   if connection is not None else partial(revision_store.update_card, memory_db_path))
+    create_extension = (partial(revision_store.create_extension_in_transaction, connection)
+                        if connection is not None else partial(revision_store.create_extension, memory_db_path))
     action = decision["action"]
     if action == "extend":
         target = {
             int(item["card_id"]): item for item in frozen_map
         }[decision["target_card_id"]]
-        return revision_store.create_extension(
-            memory_db_path,
+        return create_extension(
             card_id=target["card_id"],
             expected_base_revision_id=target["current_revision_id"],
             content=str(core.get("content") or "").strip(),
@@ -425,8 +432,7 @@ def _commit(decision, core, frozen_map, *, memory_db_path, candidate_id,
             "importance": "derived",
             "tags": "derived",
         }
-        return revision_store.create_card(
-            memory_db_path,
+        return create_card(
             content=decision["content"],
             title=title,
             tags=decision["category"],
@@ -451,8 +457,7 @@ def _commit(decision, core, frozen_map, *, memory_db_path, candidate_id,
         int(item["card_id"]): item for item in frozen_map
     }[decision["target_card_id"]]
     title = target.get("title") or str(core.get("title") or "").strip()
-    return revision_store.update_card(
-        memory_db_path,
+    return update_card(
         card_id=target["card_id"],
         expected_current_revision_id=target["current_revision_id"],
         content=decision["content"],

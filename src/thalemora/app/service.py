@@ -12,7 +12,7 @@ from thalemora.inner_world.store import InnerStore
 from thalemora.persona import Persona
 from thalemora.self_model.host import HostedSelfModel
 from thalemora.memory import schema as memory_schema
-from thalemora.memory.revision_store import create_card
+from thalemora.memory.revision_store import create_card, update_card
 from thalemora.water import schema as water_schema
 from thalemora.water.store import create_node
 
@@ -80,6 +80,15 @@ class Application:
         if any(e.get("app") != app_id or e.get("channel", "main") != channel for e in events):
             raise ValueError("导入来源必须与请求域一致")
         return self.archive(agent_id, app_id, channel).import_history(events)
+
+    def maintenance_tick(self, agent_id, app_id, channel="main", *, limit=4, provider=None):
+        """显式后台单次工作；PRE6-4 仅接受带 synthetic=True 的合成 Provider。"""
+        from .maintenance import maintenance_tick
+        return maintenance_tick(self, agent_id, app_id, channel, limit=limit, provider=provider)
+
+    def maintenance_status(self, agent_id, app_id, channel="main", *, limit=20):
+        from .maintenance import maintenance_status
+        return maintenance_status(self, agent_id, app_id, channel, limit=limit)
 
     def search(self, agent_id, app_id, query, channel="main", *, limit=20, offset=0):
         """1–2 字符走 Btree 短 gram；更长原话查询沿用 FTS5 trigram。"""
@@ -155,6 +164,19 @@ class Application:
                            origin="manual_ui", source="manual", evidence_source_kind="manual",
                            evidence_source_ref=ref)
 
+    def revise_memory(self, agent_id, app_id, card_id, content, expected_current_revision_id, channel="main"):
+        """人工正文修订，沿用正式 CAS；来源证据和其他字段语义保持原样。"""
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("人工修订正文不能为空")
+        if type(card_id) is not int or type(expected_current_revision_id) is not int:
+            raise ValueError("card_id 和 expected_current_revision_id 须为整数")
+        return update_card(self.memory_path(agent_id, app_id, channel), card_id=card_id,
+                           content=content, expected_current_revision_id=expected_current_revision_id,
+                           origin="manual_ui", change_type="manual_edit",
+                           evidence_source_kind="manual",
+                           evidence_source_ref=json.dumps({"kind": "mcp_explicit_manual_revision",
+                                                           "app": app_id, "channel": channel}))
+
     def evidence(self, agent_id, app_id, card_id, channel="main", *, limit=20, offset=0):
         self.page(limit, offset)
         with closing(sqlite3.connect(self.memory_path(agent_id, app_id, channel))) as db:
@@ -165,8 +187,21 @@ class Application:
         archive = self.archive(agent_id, app_id, channel)
         with closing(sqlite3.connect(archive.path)) as db:
             for item in evidence:
-                if item["source_kind"] == "manual":
-                    ref = json.loads(item["source_ref"])
+                if item["source_kind"] in {"manual", "derived"}:
+                    if item["source_kind"] == "derived":
+                        try:
+                            ref = json.loads(item["source_ref"])
+                        except (ValueError, TypeError):
+                            continue
+                        if not isinstance(ref, dict) or ref.get("kind") != "archive_quote":
+                            continue
+                    else:
+                        ref = json.loads(item["source_ref"])
+                    if ref.get("kind") == "mcp_explicit_manual_revision":
+                        item["resolution"] = "manual_revision"
+                        item["current_source_text"] = None
+                        item["verified"] = False
+                        continue
                     self.registry.assert_source(self.owner, agent_id, ref["app"], ref["channel"])
                     row = db.execute("SELECT version,deleted,text FROM history_events WHERE app=? AND channel=? "
                                      "AND source_event_id=?", (ref["app"], ref["channel"], ref["source_event_id"])).fetchone()

@@ -7,7 +7,8 @@ class Reflection(StateDomain):
     TARGETS = {"memory", "self_model", "persona", "emotion", "diary", "dream", "whisper"}
     TRANSITIONS = {"open": {"reviewed", "dismissed"}, "reviewed": {"dismissed"}}
 
-    def propose(self, *, text, target_kind, target_id, target_version, recorded_at):
+    def propose(self, *, text, target_kind, target_id, target_version, recorded_at,
+                source_ref=None):
         self.session.check()
         if (target_kind not in self.TARGETS or not isinstance(target_id, str) or not target_id
                 or type(target_version) is not int or target_version < 1
@@ -17,7 +18,7 @@ class Reflection(StateDomain):
             "text": text, "target_kind": target_kind, "target_id": target_id,
             "target_version": target_version, "state": "open", "effect": "suggestion_only",
             "target_verified": False,
-        }, self._audit("propose"), recorded_at=recorded_at)
+        }, self._audit("propose"), recorded_at=recorded_at, source_ref=source_ref)
 
     def _audit(self, action):
         return {"agent_id": self.session.agent_id, "principal_id": self.session.owner.principal_id,

@@ -7,11 +7,11 @@
 源自念念长期运行实践的 **AI 记忆与连续性系统**。<br>
 连接原话证据、可修订的长期记忆与身份状态，让每一次回忆有出处。
 
-[![Version](https://img.shields.io/badge/version-0.4.0-2563eb?style=flat-square)](https://github.com/yuyu1838309000-cmd/Thalemora/tree/v0.4.0)
+[![Version](https://img.shields.io/badge/version-0.5.0-2563eb?style=flat-square)](https://github.com/yuyu1838309000-cmd/Thalemora/tree/v0.5.0)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-334155?style=flat-square)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-334155?style=flat-square)](LICENSE)
 
-[核心能力](#核心能力) · [快速开始](#快速开始) · [接入与文档](#接入与文档) · [来源与致谢](#来源与致谢)
+[核心能力](#核心能力) · [零基础安装](docs/GETTING_STARTED.md) · [快速开始](#快速开始) · [接入与文档](#接入与文档) · [来源与致谢](#来源与致谢)
 
 </div>
 
@@ -28,14 +28,16 @@
 | **多 Agent 与跨应用** | 隔离身份、数据与检索；同一 Agent 的应用来源经过授权后可以共享档案。 |
 | **本地优先** | 无模型 Key 可导入、浏览、原话检索和人工管理记忆；云端模型按用途配置，付费调用默认关闭。 |
 
-### 0.4.0 可以做什么
+### 0.5.0 可以做什么
 
 - **独立运行**：中文 Web 管理台、Python、HTTP、MCP，以及 Docker Compose。
 - **管理与检索**：历史导入、原话搜索、人工 Memory / Water 操作、内在状态浏览和人格配置。
 - **保存与恢复**：全量历史导入导出、停止写入后的实例快照与恢复、Provider 配置及调用用量审计。
 - **宿主集成**：Scene、Gatekeeper、生命周期及 Self Model 等领域核心可由 Python 接入。
+- **MCP 九工具**：同一服务的 Streamable HTTP `/mcp`（Bearer 管理密钥）与原有 stdio，支持原话与 Memory 读取、来源导入、明确的人工记忆和修订。
+- **实验性维护入口**：Python 宿主显式调用 `maintenance_tick` 可用合成 Provider 验证 Scene-first Writer → Gatekeeper → Memory → Reflection 的可恢复流程；**尚不支持真实模型后台无人值守自动整理**。
 
-自动 Writer / Gatekeeper / Reflection 模型管线、真实 Agent 的证据接线与念念生产迁移仍待完成。当前 Provider 接口用于显式调用；本地向量检索需由 Python 宿主提供 embedder。具体可用入口见 [使用手册](docs/P4_USAGE.md)。
+真实模型 Writer / Gatekeeper / Reflection、无人值守调度、正式 Agent 事件接线与念念生产迁移仍未完成。显式合成维护入口见 [PRE6-4 用法](docs/PRE6_4_USAGE.md)；本地向量检索仍需 Python 宿主提供 embedder。参见 [使用手册](docs/P4_USAGE.md)。
 
 ### 数据如何连接
 
@@ -53,10 +55,12 @@ flowchart TD
 
 ## 快速开始
 
+**第一次安装、不会用终端？** 先看 [普通用户安装与第一次使用](docs/GETTING_STARTED.md)，按 [Windows](docs/INSTALL_WINDOWS.md) / [Linux](docs/INSTALL_LINUX.md) / [Android 手机试装（尚未一键安装）](docs/INSTALL_ANDROID.md) 分流；安装难点已记入 [简化清单](docs/INSTALL_FRICTION.md)。
+
 需要 **Python 3.10+**。首次启动无需模型 Key。
 
 ```bash
-git clone https://github.com/yuyu1838309000-cmd/Thalemora.git
+git clone --depth 1 --branch v0.5.0 https://github.com/yuyu1838309000-cmd/Thalemora.git
 cd Thalemora
 
 python3 -m venv .venv
@@ -96,7 +100,7 @@ docker compose -f deploy/compose.yaml up --build -d
 | **Web 管理台** | 导入历史、检索原话、整理记忆与查看状态 | [使用手册](docs/P4_USAGE.md) |
 | **Python** | 领域核心、宿主证据与自我模型接线 | [应用 API](src/thalemora/app/service.py) · [合成宿主示例](tests/test_p3_inner_world.py) |
 | **HTTP** | 通过 token 认证访问本地管理 API | [接口与参数](docs/P4_USAGE.md#python--http--mcp) |
-| **MCP** | 本地 stdio 的 Agent 列表、搜索、历史和内在状态读取 | [MCP 配置](docs/P4_USAGE.md#python--http--mcp) |
+| **MCP** | 本地 stdio / Streamable HTTP 的 9 项受保护工具 | [MCP 配置](docs/P4_USAGE.md#python--http--mcp) |
 | **导出与恢复** | 搬运授权历史、停止写入后制作和还原完整快照 | [恢复说明](docs/P4_USAGE.md#全量历史导出与恢复) |
 
 ## 来源与致谢

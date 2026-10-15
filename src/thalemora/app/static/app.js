@@ -241,6 +241,7 @@ async function load() {
   }
   loading = true;
   const currentRevision = revision;
+  let membershipsCount = 0;
   $("#refresh").disabled = true;
   $("#content").replaceChildren(node("p", "正在读取当前页…", "empty"));
   $("#tools").replaceChildren();
@@ -369,6 +370,7 @@ async function load() {
           `${r.node_type} · ${r.node_id} · 上级 ${r.parent_node_id || "海"}`,
         );
       const memberships = await api("water_memberships", { ...s, ...page });
+      membershipsCount = memberships.length;
       for (const r of memberships)
         record(r, "记忆 #" + r.card_id + " 的归属", r.container_node_id);
       const d = node("details");
@@ -487,10 +489,13 @@ async function load() {
     }
     if (!$("#content").childElementCount)
       $("#content").append(node("p", "当前页暂无记录。", "empty"));
-    $("#count").textContent = rows.length + " 条 / 当前页";
+    $("#count").textContent = view === "water"
+      ? rows.length + " 个节点 · " + membershipsCount + " 条归属 / 当前页"
+      : rows.length + " 条 / 当前页";
     $("#pageLabel").textContent = "每页至多 " + limit + " 条";
     $("#prev").disabled = !cursors.length;
-    $("#next").disabled = rows.length < limit || view === "backup";
+    $("#next").disabled = (view === "water"
+      ? Math.max(rows.length, membershipsCount) : rows.length) < limit || view === "backup";
   } catch (e) {
     rows = [];
     $("#content").replaceChildren(node("p", "读取失败：" + e.message, "empty"));

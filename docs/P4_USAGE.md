@@ -1,6 +1,10 @@
-# 洄海 0.4.0｜使用手册
+# 洄海 0.5.0 候选｜使用手册
 
-本地 Python/HTTP/MCP 共用 `Application`，管理台直接读取同一 API。0.4.0 已完成独立实例验收并公开源码与版本标签；真实 Agent 自动模型管线和念念生产接入仍待完成。
+**第一次使用、不熟悉命令行？** 请先阅读 [零基础安装与第一条记忆](GETTING_STARTED.md)。[Windows](INSTALL_WINDOWS.md) · [Linux](INSTALL_LINUX.md) · [Android 手机试装（待增量版本发布）](INSTALL_ANDROID.md) · [安装难点与后续优化](INSTALL_FRICTION.md)。本页主要是 API 和运维参数，不要求普通用户从头读完。
+
+**版本界限**：旧版 `v0.4.0` 仅有 **4 项 stdio MCP 读取工具**；拟发布的 `v0.5.0` 增加受保护的 `/mcp` Streamable HTTP 和九项工具。请从 GitHub Releases 确认版本真实存在后安装。PRE6-4 的 Writer/Gatekeeper/Reflection 仅提供显式**合成** tick，见 [候选用法](PRE6_4_USAGE.md)；真实模型后台自动整理和念念生产接入均未完成。
+
+本地 Python/HTTP/MCP 共用 `Application`，管理台直接读取同一 API。v0.4.0 既有独立实例曾通过公开 Gate；v0.5.0 新功能及文档单独验收，未获发布前仅属于候选。
 
 ## 快速启动
 
@@ -72,7 +76,67 @@ MCP 使用已安装官方 `mcp` 的 stdio：
   "args":["--data","/absolute/path/state","mcp"]}}}
 ```
 
-提供 `list_agents/search/history/inner_state` 四个工具。stdio 依赖可信本地进程上下文，能访问同一数据根的进程已具有此 owner 的管理权限；不启动第二套 SQLite owner。
+原有 `list_agents/search/history/inner_state` 四个读取工具的参数和返回方式保持兼容；另增加 `memory/evidence/import_history/remember/revise_memory`。stdio 依赖可信本地进程上下文，能访问同一数据根的进程已具有此 owner 的管理权限；不启动第二套 SQLite owner。
+
+### PRE6-2：HTTP MCP 与人工记忆操作
+
+同一 `thalemora --data ./state serve` 同时提供管理台、HTTP API 和官方 SDK 的 **Streamable HTTP** 入口 `http://127.0.0.1:8765/mcp`。复用现有 Application/Registry/数据根及官方 session manager 生命周期，不启动第二个进程，不提供旧 SSE transport。stdio 仍使用上面的 `mcp` 命令。
+
+HTTP MCP 的每次请求（含初始化、会话读取和删除）均须携带 `Authorization: Bearer <THALEMORA_TOKEN>`；缺失或不匹配返回 HTTP 401。不要将 token 写进 URL、命令行参数、日志或共享配置。该 token 代表本实例完整 owner，**不是按 app 缩权的凭据**。工具的 Agent、app、channel 授权仍由 Registry/Service 检查；private 不继承 main。MCP 不接受请求自报 owner/Agent 作者身份，也不创建认证用户。
+
+使用官方 Python 客户端（token 从环境读取，不打印）：
+
+```python
+import asyncio
+import os
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+async def main():
+    async with httpx.AsyncClient(headers={
+        "Authorization": "Bearer " + os.environ["THALEMORA_TOKEN"]
+    }) as http:
+        async with streamable_http_client("http://127.0.0.1:8765/mcp", http_client=http) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                print([tool.name for tool in tools.tools])
+
+asyncio.run(main())
+```
+
+| 新增 MCP 工具 | 参数与真实回执 |
+| --- | --- |
+| `memory` | `agent_id, app_id`；可选 `channel="main", limit=20, offset=0`；返回记忆正文和 `current_revision_id` |
+| `evidence` | 上述域及分页参数，加 `card_id`；返回各修订来源证据、`resolution`、当前来源正文；人工来源 `verified=false` |
+| `import_history` | **显式** `agent_id, app_id, channel, events`；events 为 1..100 个来源 envelope；返回各事件的 `status/version/current_version` |
+| `remember` | `agent_id, app_id, source_event_id`，可选 `channel="main"`；仅把已有未删除事件原文写成人工记忆，返回 `card_id/changed/current_revision_id` |
+| `revise_memory` | `agent_id, app_id, card_id, content, expected_current_revision_id`，可选 `channel="main"`；只做明确的人工正文修订，返回实际 `card_id/changed/current_revision_id` |
+
+先通过现有管理台/API 注册 Agent、授权来源，然后导入 envelope。例如工具 `import_history` 的 arguments：
+
+```json
+{
+  "agent_id": "<已注册的 Agent UUID>",
+  "app_id": "demo-app",
+  "channel": "main",
+  "events": [{
+    "app": "demo-app", "channel": "main", "source_event_id": "demo-1",
+    "version": 1, "role": "user", "text": "合成示例：一起整理旅行计划。",
+    "occurred_at": "2026-10-15T10:00:00+08:00",
+    "conversation_id": "demo-conversation", "epoch_id": null,
+    "content_hash": null, "hash_verification": "unknown", "raw_event_id": null,
+    "deleted": false
+  }]
+}
+```
+
+envelope 沿用已有来源合同，`app/channel` 必须匹配请求域；来源 ID、版本、时间、角色、原文、会话/epoch、hash 及验证状态、raw ID 和删除标记均保留。重复相同版本返回 `unchanged`，同版本异文失败，较旧版本返回 `ignored_stale`。逐事件提交，批中失败前已提交项保留，可按原 envelope 幂等重试。**导入仅保存授权历史，不自动运行 Writer，不自动生成 Memory，也不是可信 Agent 行动事件。**
+
+`remember` 不接受自由正文或作者参数；每次显式调用会创建一张人工卡片。`revise_memory` 使用现有 `memory.revision_store.update_card` CAS：先从 `memory` 读取当前修订 ID；旧 ID 会得到 MCP `isError=true`，错误包含 expected/current revision；ID 正确但正文相同则 `changed=false` 且不追加版本。正文不能为空。固定人工 `manual_ui/manual_edit`，不接受自选 origin，不改其他字段来源语义或 Self Model。原始原话证据留在旧修订链中；新修订另记录 `mcp_explicit_manual_revision`，证据显示 `resolution=manual_revision`、`verified=false`，不把旧原话冒充新正文的证明。旧原话后续变化仍可标示 `source_changed/deleted`，不会重写人工 Memory。
+
+失败通过真实 MCP `isError=true` 返回，不包装成写入成功。标准 MCP 不保证工具结果都是 structuredContent：原有列表工具保持原 TextContent 表示，客户端应按 SDK 的工具 schema/内容处理。
 
 ## 无 Key 与模型接线
 

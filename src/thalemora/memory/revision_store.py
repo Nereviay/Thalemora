@@ -384,6 +384,11 @@ def update_card_in_transaction(
         field: current[field] if supplied[field] is UNCHANGED else supplied[field]
         for field in _SNAPSHOT_FIELDS
     }
+    if origin == "auto_writer":
+        provenance = memory_field_sources.get(conn, card_id)
+        if any(provenance.get(field) in {"user_explicit", "agent_explicit"}
+               and current[field] != updated[field] for field in memory_field_sources.FIELDS):
+            raise InvalidRevisionState("auto_writer cannot overwrite explicit fields")
     if is_metadata_maintenance:
         allowed = set(maintenance_fields) & {"title","keywords","importance","tags"}
         if any(field not in allowed and current[field] != updated[field] for field in _SNAPSHOT_FIELDS):

@@ -257,7 +257,9 @@ class P4Tests(unittest.TestCase):
         self.insert()
         server = create_mcp(self.service)
         async def run():
-            self.assertEqual({t.name for t in await server.list_tools()}, {'list_agents','history','search','inner_state'})
+            self.assertEqual({t.name for t in await server.list_tools()}, {
+                'list_agents','history','search','inner_state','memory','evidence',
+                'import_history','remember','revise_memory'})
             result = await server.call_tool('history', dict(agent_id=self.a, app_id=self.app))
             self.assertIn('旅行计划', str(result))
             from mcp.server.fastmcp.exceptions import ToolError
@@ -385,7 +387,7 @@ class P4Tests(unittest.TestCase):
                 async with ClientSession(read,write) as session:
                     await session.initialize()
                     tools=await session.list_tools()
-                    self.assertEqual(len(tools.tools),4)
+                    self.assertEqual(len(tools.tools),9)
                     reply=await session.call_tool('search',dict(agent_id=self.a,app_id=self.app,query='旅行计划'))
                     self.assertFalse(reply.isError)
                     self.assertIn('旅行计划',reply.content[0].text)

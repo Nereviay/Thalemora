@@ -1,0 +1,10 @@
+# Python 构建和运行临时文件
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
+# 浏览器合成测试临时目录
+tests/.tmp/

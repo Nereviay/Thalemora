@@ -1,6 +1,7 @@
 """HTTP 只负责认证、参数和服务接线；无外部 principal/actor 身份入口。"""
 import hmac
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -10,11 +11,32 @@ from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 
 from .providers import ProviderUnavailable
+from .mcp import create_mcp
 
 
 def create_http(service, token):
     if not isinstance(token, str) or not token:
         raise ValueError("服务器管理 token 必须配置")
+    mcp = create_mcp(service)
+    mcp_app = mcp.streamable_http_app()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        async with mcp.session_manager.run():
+            yield
+
+    class ProtectedMCP:
+        async def __call__(self, scope, receive, send):
+            authorization = dict(scope["headers"]).get(b"authorization", b"")
+            if not hmac.compare_digest(authorization, ("Bearer " + token).encode()):
+                response = JSONResponse({"error": "管理身份认证失败"}, status_code=401,
+                                        headers={"WWW-Authenticate": "Bearer"})
+                await response(scope, receive, send)
+                return
+            await mcp_app(scope, receive, send)
+
+    protected_mcp = ProtectedMCP()
+
     reads = {name: getattr(service, name) for name in (
         "list_agents", "sources", "history", "search", "memory", "evidence", "water",
         "water_memberships", "inner_state", "capabilities", "local_search")}
@@ -69,4 +91,7 @@ def create_http(service, token):
 
     return Starlette(routes=[Route("/health", health),
                              Route("/api/{operation}", endpoint, methods=["GET", "POST"]),
-                             Mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True))])
+                             Route("/mcp", protected_mcp),
+                             Route("/mcp/", protected_mcp),
+                             Mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True))],
+                     lifespan=lifespan)
