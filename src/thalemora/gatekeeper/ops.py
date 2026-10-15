@@ -290,8 +290,8 @@ def mark_candidate_applied(candidate_id, card_id, revision_id=None, db_path=None
         candidate_id, "applied", card_id, revision_id, None, db_path
     )
 
-def mark_candidate_dropped(candidate_id, db_path=None):
-    _finish_candidate(candidate_id, "dropped", None, None, None, db_path)
+def mark_candidate_dropped(candidate_id, db_path=None, *, reason=None):
+    _finish_candidate(candidate_id, "dropped", None, None, reason, db_path)
 
 def supersede_legacy_candidate(candidate_id, db_path=None):
     _finish_candidate(

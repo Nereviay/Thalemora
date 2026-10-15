@@ -1,6 +1,6 @@
 """显式、可恢复的 Archive → Scene → Writer → Gatekeeper → Memory 单次后台任务。
 
-本阶段仅注入合成 Provider；不接付费 Providers，不在导入或检索中调用模型。
+只在显式 tick / 独立 worker 中调用配置的 Provider，不在导入或检索中调用模型。
 Scene/ops 是派生进度；Archive、revision_store、Reflection 各自保留正式权威。
 """
 from contextlib import closing
@@ -45,13 +45,27 @@ def setup(application, agent_id, app_id, channel):
                 attempts INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS maintenance_calls(
                 id INTEGER PRIMARY KEY,job_id TEXT NOT NULL,module TEXT NOT NULL,
-                status TEXT NOT NULL,synthetic INTEGER NOT NULL CHECK(synthetic=1),
-                usage TEXT,output TEXT,actual_tokens INTEGER CHECK(actual_tokens IS NULL),error TEXT,
+                status TEXT NOT NULL,synthetic INTEGER NOT NULL CHECK(synthetic IN (0,1)),
+                usage TEXT,output TEXT,actual_tokens INTEGER,error TEXT,provider_call_id INTEGER,
                 created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS maintenance_reflections(
                 candidate_id TEXT PRIMARY KEY,card_id INTEGER NOT NULL,revision_id INTEGER NOT NULL,
                 text TEXT,status TEXT NOT NULL,error TEXT,item_id TEXT);
         """)
+        db.execute("BEGIN IMMEDIATE")
+        schema = db.execute("SELECT sql FROM sqlite_master WHERE name='maintenance_calls'").fetchone()[0]
+        if "CHECK(synthetic=1)" in schema:
+            # v0.5.0 的审计表只允许合成调用；保留全部旧回执再一次性升级。
+            db.execute("CREATE TABLE maintenance_calls_v2("
+                       "id INTEGER PRIMARY KEY,job_id TEXT NOT NULL,module TEXT NOT NULL,"
+                       "status TEXT NOT NULL,synthetic INTEGER NOT NULL CHECK(synthetic IN (0,1)),"
+                       "usage TEXT,output TEXT,actual_tokens INTEGER,error TEXT,provider_call_id INTEGER,"
+                       "created_at TEXT NOT NULL)")
+            db.execute("INSERT INTO maintenance_calls_v2 "
+                       "SELECT id,job_id,module,status,synthetic,usage,output,actual_tokens,error,NULL,created_at "
+                       "FROM maintenance_calls")
+            db.execute("DROP TABLE maintenance_calls")
+            db.execute("ALTER TABLE maintenance_calls_v2 RENAME TO maintenance_calls")
     with closing(ops.connect_writer_ops(path)):
         pass
     return archive, path, scope
@@ -74,21 +88,23 @@ def maintenance_status(application, agent_id, app_id, channel="main", *, limit=2
             "reflections": [dict(r) for r in db.execute(
                 "SELECT * FROM maintenance_reflections ORDER BY candidate_id LIMIT ?", (limit,))]}
     return {"agent_id": agent_id, "app": app_id, "channel": channel,
-            "provider_mode": "synthetic_only", "scene_progress": state, **result}
+            "provider_mode": "explicit_provider", "scene_progress": state, **result}
 
 
 def call(provider, path, job_id, module, payload):
     with connect(path) as db, db:
         call_id = db.execute("INSERT INTO maintenance_calls(job_id,module,status,synthetic,created_at) "
-                             "VALUES(?,?,'pending',1,?)", (job_id, module, now())).lastrowid
+                             "VALUES(?,?,'pending',?,?)", (job_id, module, int(provider.synthetic), now())).lastrowid
     try:
         response = provider.call(module, payload)
-        # Usage is recorded exactly as supplied, always synthetic, never actual tokens.
+        # 合成用量不冒充实际 token；真实调用关联同一 Providers 审计回执。
         output = response["output"]
         usage = encoded(response.get("usage"))
         with connect(path) as db, db:
-            db.execute("UPDATE maintenance_calls SET status='success',usage=?,output=? WHERE id=?",
-                       (usage, encoded(output), call_id))
+            db.execute("UPDATE maintenance_calls SET status='success',usage=?,output=?,actual_tokens=?,"
+                       "provider_call_id=? WHERE id=?",
+                       (usage, encoded(output), None if provider.synthetic else response["usage"]["total_tokens"],
+                        response.get("call_id"), call_id))
         return output
     except Exception as exc:
         with connect(path) as db, db:
@@ -142,9 +158,24 @@ def materialize(routes, sources, agent_id, app_id, channel, job_id):
 
 def freeze(memory_path, app_id, channel):
     with connect(memory_path) as db:
-        ids = [r[0] for r in db.execute(
-            "SELECT card_id FROM archive_card_scopes WHERE app=? AND channel=?", (app_id, channel))]
-    return gate.freeze_candidate_map_from_card_ids(ids, memory_db_path=memory_path)
+        ids = {r[0] for r in db.execute(
+            "SELECT card_id FROM archive_card_scopes WHERE app=? AND channel=?", (app_id, channel))}
+        # 人工卡在 v0.5.0 未登记 archive_card_scopes，按已有人工证据归属读取；
+        # 不猜测无来源卡片的 app，也不将其他 app 的人工正文送入模型。
+        for row in db.execute(
+                "SELECT DISTINCT c.id,e.source_ref FROM cards c "
+                "JOIN card_revisions history ON history.card_id=c.id AND history.revision_no=1 "
+                "JOIN card_evidence e ON e.revision_id=history.id "
+                "WHERE c.source='manual' AND e.source_kind='manual' "
+                "AND NOT EXISTS(SELECT 1 FROM archive_card_scopes s WHERE s.card_id=c.id)"):
+            try:
+                ref = json.loads(row["source_ref"])
+            except (ValueError, TypeError):
+                continue  # 历史手工来源可能是自由文本，不伪造 scope。
+            if isinstance(ref, dict) and ref.get("app") == app_id and ref.get("channel", "main") == channel:
+                ids.add(row["id"])
+    return gate.freeze_candidate_map_from_card_ids(sorted(ids), memory_db_path=memory_path,
+                                                   include_read_only=True)
 
 
 def applied_receipt(path, candidate_id, result):
@@ -183,6 +214,7 @@ def commit(application, archive, memory_path, sources, app_id, channel, candidat
 
 
 def reflect(application, agent_id, app_id, channel, path, provider, limit):
+    errors = []
     with connect(path) as db:
         rows = [dict(r) for r in db.execute(
             "SELECT * FROM maintenance_reflections WHERE status!='done' ORDER BY candidate_id LIMIT ?", (limit,))]
@@ -212,15 +244,18 @@ def reflect(application, agent_id, app_id, channel, path, provider, limit):
                 db.execute("UPDATE maintenance_reflections SET status='done',error=NULL,item_id=? WHERE candidate_id=?",
                            (result["item_id"], row["candidate_id"]))
         except Exception as exc:
+            errors.append(f"reflection:{type(exc).__name__}:{exc}")
             with connect(path) as db, db:
                 db.execute("UPDATE maintenance_reflections SET status='error',error=? WHERE candidate_id=?",
                            (str(exc), row["candidate_id"]))
+    return errors
 
 
 def maintenance_tick(application, agent_id, app_id, channel="main", *, limit=4, provider=None):
     application.page(limit, 0)
-    if provider is not None and getattr(provider, "synthetic", False) is not True:
-        raise ValueError("PRE6-4 provider must explicitly declare synthetic=True")
+    from .maintenance_provider import MaintenanceProvider
+    if provider is not None and not isinstance(provider, MaintenanceProvider) and getattr(provider, "synthetic", False) is not True:
+        raise ValueError("provider 须为 MaintenanceProvider 或显式 synthetic=True 的合成实现")
     archive, path, scope = setup(application, agent_id, app_id, channel)
     # Process death releases this lock. Across-process ticks cannot duplicate model/commit work.
     with path.with_suffix(".lock").open("a") as lock:
@@ -247,6 +282,7 @@ def maintenance_tick(application, agent_id, app_id, channel="main", *, limit=4, 
         with connect(path) as db:
             jobs = [dict(r) for r in db.execute(
                 "SELECT * FROM maintenance_jobs WHERE status NOT IN ('done','stale') ORDER BY updated_at,job_id LIMIT ?", (limit,))]
+        errors = []
         for job in jobs:
             candidate_id = None
             sources = json.loads(job["sources"])
@@ -282,7 +318,8 @@ def maintenance_tick(application, agent_id, app_id, channel="main", *, limit=4, 
                     candidates = materialize(output["candidates"], sources, agent_id, app_id, channel, job["job_id"])
                     ids = [r["archive_rowid"] for r in sources]
                     ops.put_writer_batch(dict(batch_key=job["job_id"], raw_start_id=min(ids), raw_end_id=max(ids),
-                                              input_hash=job["sources"], extractor_model="synthetic-injected",
+                                              input_hash=job["sources"], extractor_model=("synthetic-injected" if provider.synthetic
+                                                                                         else provider.model("writer")),
                                               policy_version="archive-scene-v1"), candidates, path)
                 job_state(path, job["job_id"], "extracted")
                 for candidate in ops.get_pending_candidates(job["job_id"], path):
@@ -297,10 +334,11 @@ def maintenance_tick(application, agent_id, app_id, channel="main", *, limit=4, 
                         decision, frozen = gate.decide(payload, frozen, provider=lambda messages: call(
                             provider, path, job["job_id"], "gatekeeper", {"messages": messages}))
                         ops.record_gate_result(candidate_id, gate.gate_input_hash(payload, frozen, {
-                            "model": "synthetic-injected", "thinking_enabled": False, "reasoning_effort": None}),
+                            "model": "synthetic-injected" if provider.synthetic else provider.model("gatekeeper"),
+                            "thinking_enabled": False, "reasoning_effort": None}),
                             decision["reason"], increment=True, db_path=path)
                         if decision["action"] == "drop":
-                            ops.mark_candidate_dropped(candidate_id, path)
+                            ops.mark_candidate_dropped(candidate_id, path, reason=decision["reason"])
                             continue
                         if decision["action"] == "uncertain":
                             ops.update_candidate_payload(candidate_id, payload, "uncertain", path)
@@ -313,9 +351,11 @@ def maintenance_tick(application, agent_id, app_id, channel="main", *, limit=4, 
                 if not pending:
                     engine.mark_considered(job["scene_id"], job["scene_revision"], "processed", "archive_tick")
             except Exception as exc:
+                errors.append(f"{type(exc).__name__}:{exc}")
                 if candidate_id is not None:
                     ops.mark_candidate_failed(candidate_id, f"{type(exc).__name__}:{exc}", path)
                 job_state(path, job["job_id"], "error", f"{type(exc).__name__}:{exc}")
         if provider is not None:
-            reflect(application, agent_id, app_id, channel, path, provider, limit)
-    return {"progress": progress, **maintenance_status(application, agent_id, app_id, channel, limit=limit)}
+            errors.extend(reflect(application, agent_id, app_id, channel, path, provider, limit))
+    return {"progress": progress, "errors": errors,
+            **maintenance_status(application, agent_id, app_id, channel, limit=limit)}

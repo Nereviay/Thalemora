@@ -15,6 +15,15 @@ def main():
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--container", action="store_true", help="容器内部绑定所有接口；Compose 宿主仍限 loopback")
     commands.add_parser("mcp")
+    for name in ("worker", "maintenance-status"):
+        command = commands.add_parser(name)
+        command.add_argument("agent_id")
+        command.add_argument("app_id")
+        command.add_argument("--channel", choices=("main", "private"), default="main")
+        command.add_argument("--limit", type=int, default=1 if name == "worker" else 20)
+        if name == "worker":
+            command.add_argument("--interval", type=float, default=60)
+            command.add_argument("--once", action="store_true", help="只运行一轮有界维护")
     for name in ("export-history", "import-history"):
         command = commands.add_parser(name)
         command.add_argument("agent_id")
@@ -32,6 +41,19 @@ def main():
         print(operation(args.source, args.destination))
         return
     service = Application(args.data)
+    if args.command == "maintenance-status":
+        print(json.dumps(service.maintenance_status(args.agent_id, args.app_id, args.channel,
+                                                   limit=args.limit), ensure_ascii=False))
+        return
+    if args.command == "worker":
+        from threading import Event
+        import signal
+        from .worker import run_worker
+        stop = Event()
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, lambda *_: stop.set())
+        raise SystemExit(run_worker(service, args.agent_id, args.app_id, args.channel,
+                                    limit=args.limit, interval=args.interval, once=args.once, stop=stop))
     if args.command == "export-history":
         offset = 0
         with args.file.open("w", encoding="utf-8") as target:

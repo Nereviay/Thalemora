@@ -82,7 +82,7 @@ class Application:
         return self.archive(agent_id, app_id, channel).import_history(events)
 
     def maintenance_tick(self, agent_id, app_id, channel="main", *, limit=4, provider=None):
-        """显式后台单次工作；PRE6-4 仅接受带 synthetic=True 的合成 Provider。"""
+        """显式后台单次工作；真实模型由宿主/worker 显式注入，前台不隐式触发。"""
         from .maintenance import maintenance_tick
         return maintenance_tick(self, agent_id, app_id, channel, limit=limit, provider=provider)
 

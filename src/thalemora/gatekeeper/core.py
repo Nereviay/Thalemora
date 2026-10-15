@@ -14,9 +14,14 @@ from . import keywords as keyword_policy
 from . import ops as ops_store
 
 # 仅公共决策协议；产品叙述视角由调用方 provider 负责，不携带私人 Prompt。
-SYSTEM = "按候选事实及冻结卡片决定 new/extend/correct/supersede/drop/uncertain。只返回 JSON。更新须同一记忆且置信度至少 0.85；extend 仅附加候选原文，不改主卡。字段为 action,target_card_id,same_memory,same_memory_confidence,long_term_value,content,title,keywords,category,importance,reason。保留来源、否定、时间及不确定性，不编造事实。"
+SYSTEM = """按候选事实及冻结卡片决定 new/extend/correct/supersede/drop/uncertain，只返回 JSON 对象。
+更新须同一记忆且置信度至少 0.85；extend 仅附加候选原文，不改主卡。
+字段类型：action 为上述枚举；target_card_id 为冻结卡片的整数 ID 或 null；same_memory、long_term_value 为 JSON 布尔值；same_memory_confidence 为 0–1 数字；importance 为 1–10 数字，不能填 high/low；content、title、reason 为字符串；keywords 为逗号分隔字符串；category 仅选我们/你/我/项目/规则/生活/心情/日子/未分类。
+结构示例（不是预设决策）：{"action":"new","target_card_id":null,"same_memory":false,"same_memory_confidence":0,"long_term_value":true,"content":"事实正文","title":"简短标题","keywords":"关键词一,关键词二","category":"项目","importance":6,"reason":"判断依据"}。
+read_only=true 的卡是人工权威，仍须参与同一记忆判断；同一事实的重复、补充或冲突一律 drop 并说明人工只读原因，不得改写或另建平行卡。new 只用于与已有卡不同的独立事实。
+保留来源、否定、时间及不确定性，不编造事实。"""
 SCENE_NEW_CARD_RULES = "Scene 新卡须明确通过三十天长期价值判断 long_term_value；用户明确偏好及约定须保留。"
-RELATION_RECHECK_SYSTEM = "只复核明确纠正候选与冻结旧卡是否同一记忆，返回相同决策协议 JSON。"
+RELATION_RECHECK_SYSTEM = SYSTEM + "本次只复核明确纠正候选与冻结旧卡是否同一记忆。"
 MAINTENANCE_SYSTEM = "只依据原文提出整理稿及缺失元数据、现有 Stream 路由；遵守输入作者与叙述者，不编造事实或行动。原文始终是唯一事实权威。返回 JSON 字段 organized_content,title,keywords,importance,tags,water_stream_id,water_reason。fill_fields 之外的元数据返回 null；needs_organized_content=false 时整理稿返回 null；needs_water=false 时路由返回 null。importance 为 1–10，tags 仅选我们/你/我/项目/规则/生活/心情/日子/未分类；Stream 仅从输入 active_streams 选择，无合适位置返回 null。"
 
 
@@ -73,11 +78,11 @@ def _stable_hash(value):
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
-def freeze_candidate_map_from_card_ids(card_ids, *, memory_db_path):
+def freeze_candidate_map_from_card_ids(card_ids, *, memory_db_path, include_read_only=False):
     """Freeze canonical Memory projections for an already-derived candidate set.
 
-    This is decision-only input preparation. It never mutates Memory and keeps
-    the same manual/timeline authority exclusions as the legacy recall path.
+    Decision-only projection. The maintenance caller may include manual cards
+    as read_only relationship context; legacy callers retain their exclusions.
     """
     memory_path = memory_db_path
     ordered_ids = []
@@ -110,9 +115,8 @@ def freeze_candidate_map_from_card_ids(card_ids, *, memory_db_path):
             item = dict(row)
             if str(item.get("memory_kind") or "episodic") == "timeline":
                 continue
-            if str(item.get("source") or "") == "manual":
-                continue
-            if str(item.get("revision_origin") or "") == "manual_ui":
+            read_only = (item.get("source") == "manual" or item.get("revision_origin") == "manual_ui")
+            if read_only and not include_read_only:
                 continue
             frozen.append({
                 "card_id": card_id,
@@ -123,6 +127,7 @@ def freeze_candidate_map_from_card_ids(card_ids, *, memory_db_path):
                 "keywords": item.get("keywords") or "",
                 "importance": float(item.get("importance") or 0),
                 "memory_kind": item.get("memory_kind") or "episodic",
+                **({"read_only": read_only} if include_read_only else {}),
             })
         return frozen
     finally:
@@ -136,6 +141,7 @@ def gate_input_hash(core, frozen_map, profile):
             "current_revision_id": item["current_revision_id"],
             "title": item.get("title") or "",
             "content": item.get("content") or "",
+            **({"read_only": item["read_only"]} if "read_only" in item else {}),
         }
         for item in ordered
     ]
@@ -227,7 +233,7 @@ def _parse_decision(raw, frozen_map, fallback_content, *, fallback_importance=No
         )
     except (TypeError, ValueError):
         same_memory_confidence = 0.0
-    return {
+    parsed = {
         "action": action,
         "target_card_id": target_id,
         "same_memory": same_memory,
@@ -253,6 +259,10 @@ def _parse_decision(raw, frozen_map, fallback_content, *, fallback_importance=No
         "importance": importance,
         "reason": str(decision.get("reason") or "").strip(),
     }
+
+    if action in UPDATE_ACTIONS and frozen_by_id[target_id].get("read_only"):
+        parsed.update(action="drop", target_card_id=None, reason="manual_memory_read_only")
+    return parsed
 
 def _guard_same_memory_update(decision, core):
     """Fail closed on destructive reconciliation: related is not identical."""
@@ -293,7 +303,7 @@ def _relation_recheck(core, frozen_map, provider, *, fallback_importance=None):
         fallback_importance=fallback_importance,
     )
     decision = _guard_same_memory_update(decision, core)
-    if decision["action"] in {"extend", "correct", "supersede"}:
+    if decision["action"] in {"extend", "correct", "supersede"} or decision["reason"] == "manual_memory_read_only":
         return decision
     return None
 

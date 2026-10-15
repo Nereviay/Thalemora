@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thalemora"
-version = "0.5.0"
+version = "0.6.0.dev1"
 description = "洄海：独立记忆与连续性管理"
 license = "Apache-2.0"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]

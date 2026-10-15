@@ -39,6 +39,8 @@
 
 真实模型 Writer / Gatekeeper / Reflection、无人值守调度、正式 Agent 事件接线与念念生产迁移仍未完成。显式合成维护入口见 [PRE6-4 用法](docs/PRE6_4_USAGE.md)；本地向量检索仍需 Python 宿主提供 embedder。参见 [使用手册](docs/P4_USAGE.md)。
 
+**本地候选 0.6.0.dev1 / PRE6-4B（尚未发布）**：已补真实模型协议适配与独立后台 worker，复用用途配置/预算/用量审计，前台导入与检索不等待维护模型。DeepSeek Flash 小测暴露的人工卡平行冲突与 Writer 管理指令候选已修复：36 项合成验收和 6 次定向真实复验通过。新功能仍未发布/部署，念念未接入；这不是全量真实质量或规模基准。[开发用法](docs/PRE6_4B_USAGE.md)
+
 ### 数据如何连接
 
 ```mermaid

@@ -1,5 +1,7 @@
 # PRE6-4 显式后台维护（合成依赖注入）
 
+本文记录公开 v0.5.0 的合成入口。开发分支的真实模型适配、独立 worker 与实际用量边界见 [PRE6-4B](PRE6_4B_USAGE.md)；原合成示例仍适用，未显式注入 Provider 的 tick 不付费。
+
 入口为 Python 宿主的 `Application.maintenance_tick(agent_id, app_id,
 channel="main", limit=4, provider=None)`。`limit` 为本轮最多处理的 Scene 作业数
 及 Reflection 建议数（1..100）；每轮 Scene ingestion 最多读取 1000 个来源事件。

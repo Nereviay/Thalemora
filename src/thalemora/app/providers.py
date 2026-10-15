@@ -36,17 +36,19 @@ class Providers:
             raise ValueError("未知模型用途")
 
     def configure(self, module, *, enabled=False, base_url="", model="", key_env="",
-                  capability="chat", call_budget=0, token_budget=0):
+                  capability="chat", call_budget=0, token_budget=0, thinking_enabled=None):
         self.module(module)
         if type(enabled) is not bool or capability not in ("chat", "embedding", "unsupported"):
             raise ValueError("模型开关/能力无效")
+        if thinking_enabled is not None and type(thinking_enabled) is not bool:
+            raise ValueError("thinking_enabled 须为布尔或未指定")
         if any(type(x) is not int or x < 0 for x in (call_budget, token_budget)):
             raise ValueError("预算必须为非负整数")
         if base_url and urlparse(base_url).scheme not in ("http", "https"):
             raise ValueError("base_url 必须是 HTTP(S)")
         config = dict(enabled=enabled, base_url=base_url.rstrip("/"), model=model,
                       key_env=key_env, capability=capability, call_budget=call_budget,
-                      token_budget=token_budget)
+                      token_budget=token_budget, thinking_enabled=thinking_enabled)
         with self.connect() as db, db:
             db.execute("INSERT INTO config VALUES(?,?) ON CONFLICT(module) DO UPDATE SET value=excluded.value",
                        (module, json.dumps(config)))
@@ -92,8 +94,15 @@ class Providers:
             db.row_factory = sqlite3.Row
             return [dict(r) for r in db.execute("SELECT * FROM calls ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))]
 
-    def call(self, module, text, *, max_tokens=128):
+    def call(self, module, text, *, max_tokens=128, messages=None, json_output=False):
         self.module(module)
+        if messages is not None:
+            if module == "embedding" or not isinstance(messages, list) or not messages:
+                raise ValueError("chat messages 必须为非空列表")
+            if any(not isinstance(m, dict) or m.get("role") not in ("system", "user", "assistant")
+                   or not isinstance(m.get("content"), str) for m in messages):
+                raise ValueError("chat messages 的角色或正文无效")
+            text = json.dumps(messages, ensure_ascii=False)
         if not isinstance(text, str) or not 1 <= len(text) <= 16000:
             raise ValueError("输入长度须为 1..16000 字符")
         if type(max_tokens) is not int or not 1 <= max_tokens <= 4096:
@@ -119,6 +128,12 @@ class Providers:
             else:
                 endpoint = "/chat/completions"
                 body = dict(model=config["model"], messages=[dict(role="user", content=text)], max_tokens=max_tokens)
+                if messages is not None:
+                    body["messages"] = messages
+                if json_output:
+                    body["response_format"] = {"type": "json_object"}
+                if config.get("thinking_enabled") is not None:
+                    body["thinking"] = {"type": "enabled" if config["thinking_enabled"] else "disabled"}
             request = Request(config["base_url"] + endpoint, data=json.dumps(body).encode(),
                               headers={"Authorization": "Bearer " + os.environ[config["key_env"]],
                                        "Content-Type": "application/json"})
