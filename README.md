@@ -104,6 +104,7 @@ docker compose -f deploy/compose.yaml up --build -d
 | **HTTP** | 通过 token 认证访问本地管理 API | [接口与参数](docs/P4_USAGE.md#python--http--mcp) |
 | **MCP** | 本地 stdio / Streamable HTTP 的 9 项受保护工具 | [MCP 配置](docs/P4_USAGE.md#python--http--mcp) |
 | **导出与恢复** | 搬运授权历史、停止写入后制作和还原完整快照 | [恢复说明](docs/P4_USAGE.md#全量历史导出与恢复) |
+| **维护与升级** | 版本兼容、日常检查、备份安排与故障回退 | [维护约定](docs/MAINTENANCE.md) |
 
 ## 来源与致谢
 
