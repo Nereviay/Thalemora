@@ -391,7 +391,7 @@ def _csv_union(old_value, new_value, *, title="", tags=""):
 def _commit(decision, core, frozen_map, *, memory_db_path, candidate_id,
             source, origin, evidence_source_kind, evidence_source_ref,
             evidence_rows=None, embedding_provider=None, embedding_model=None,
-            connection=None):
+            connection=None, agent_source="agent", agent_field_source="agent_explicit"):
     create_card = (partial(revision_store.create_card_in_transaction, connection)
                    if connection is not None else partial(revision_store.create_card, memory_db_path))
     update_card = (partial(revision_store.update_card_in_transaction, connection)
@@ -435,9 +435,9 @@ def _commit(decision, core, frozen_map, *, memory_db_path, candidate_id,
             limit=4,
         )
         sources = {
-            "title": ("agent_explicit" if source == "agent" and core.get("title")
+            "title": (agent_field_source if source == agent_source and core.get("title")
                       else "derived" if title else "pending"),
-            "keywords": ("agent_explicit" if source == "agent" and core.get("keywords")
+            "keywords": (agent_field_source if source == agent_source and core.get("keywords")
                          else "derived" if keywords else "pending"),
             "importance": "derived",
             "tags": "derived",
@@ -532,7 +532,7 @@ def _user_fact_has_exact_evidence(payload):
         for item in payload.get("verified_evidence") or []
     )
 
-def _scene_admission_retrieval_hints(payload, memory_db_path):
+def _scene_admission_retrieval_hints(payload, memory_db_path, *, include_read_only=False):
     """Transfer Scene-retrieved card IDs to the FINAL Gate, not its decision.
 
     These IDs are discovery hints, not revision authority. We intentionally
@@ -597,7 +597,7 @@ def _scene_admission_retrieval_hints(payload, memory_db_path):
             if active:
                 active_ids.append(card_id)
     return freeze_candidate_map_from_card_ids(
-        active_ids, memory_db_path=memory_db_path
+        active_ids, memory_db_path=memory_db_path, include_read_only=include_read_only
     )
 
 def _scene_gate_input_hash(core, frozen, payload, profile):
@@ -665,7 +665,8 @@ def _extension_storage_unavailable(candidate_id, input_hash, ops_db_path):
     }, 200
 
 def apply_candidate(candidate_id, *, ops_db_path, memory_db_path, raw_db_path, profile,
-                    frozen_map=None, provider=None, embedding_provider=None, embedding_model=None):
+                    frozen_map=None, provider=None, embedding_provider=None, embedding_model=None,
+                    include_read_only=False):
     memory_path = memory_db_path
     candidate = ops_store.get_candidate(candidate_id, ops_db_path)
     if candidate is None:
@@ -733,7 +734,7 @@ def apply_candidate(candidate_id, *, ops_db_path, memory_db_path, raw_db_path, p
     core = _core(payload)
     if frozen_map is None:
         try:
-            frozen_map = _scene_admission_retrieval_hints(payload, memory_path)
+            frozen_map = _scene_admission_retrieval_hints(payload, memory_path, include_read_only=include_read_only)
         except InvalidGateDecision as exc:
             # Malformed provenance is not a reason to create a new card.
             ops_store.record_gate_result(
@@ -796,7 +797,7 @@ def apply_candidate(candidate_id, *, ops_db_path, memory_db_path, raw_db_path, p
         return {"ok": True, "status": "pending", "retryable": False,
                 "action": "uncertain", "reason": decision["reason"]}, 200
     if decision["action"] == "drop":
-        ops_store.mark_candidate_dropped(candidate_id, ops_db_path)
+        ops_store.mark_candidate_dropped(candidate_id, ops_db_path, reason=decision["reason"])
         return {"ok": True, "status": "dropped", "action": "drop",
                 "reason": decision["reason"]}, 200
     if decision["action"] == "extend" and not extension_available:

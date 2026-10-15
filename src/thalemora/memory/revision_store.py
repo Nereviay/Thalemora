@@ -386,7 +386,7 @@ def update_card_in_transaction(
     }
     if origin == "auto_writer":
         provenance = memory_field_sources.get(conn, card_id)
-        if any(provenance.get(field) in {"user_explicit", "agent_explicit"}
+        if any(provenance.get(field) in {"user_explicit", "agent_explicit", "chenlin_explicit"}
                and current[field] != updated[field] for field in memory_field_sources.FIELDS):
             raise InvalidRevisionState("auto_writer cannot overwrite explicit fields")
     if is_metadata_maintenance:

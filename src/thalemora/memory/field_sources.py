@@ -2,7 +2,8 @@
 import sqlite3
 
 FIELDS = ("title", "keywords", "importance", "tags")
-VALID = {"user_explicit", "agent_explicit", "derived", "pending", "legacy_unknown"}
+# 旧宿主枚举只作历史兼容，保留原字段来源，不重写旧记录。
+VALID = {"user_explicit", "agent_explicit", "chenlin_explicit", "derived", "pending", "legacy_unknown"}
 
 
 def ensure(conn: sqlite3.Connection):

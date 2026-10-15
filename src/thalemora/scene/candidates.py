@@ -229,3 +229,7 @@ def enqueue_candidates(
         return {"inserted": inserted, "candidate_count": len(candidates),
                 "candidate_ids": [item["candidate_id"] for item in candidates]}
 
+
+
+# 独立与念念 Writer 共用已验的事实边界；不增加额外分类调用。
+WRITER_FACT_RULES = '当次“记住、更新、纠正上面那条、不要重复建立”等记忆管理指令不是事实或长期偏好，不单独提成候选。\n事实与指令混在一句时，只提事实内容，逐字证据只引支撑事实的片段；纯管理指令返回空 candidates。\n例如“通知改为电话，请更新原来那条”只提“通知改为电话”，不能再提“用户偏好更新而非新建”。\n明确要求未来长期采用某种记忆管理方式（如“以后所有记忆标题始终用中文”）仍是可提炼的长期偏好，\n不能仅因句子含记忆相关词就过滤。一个事实只提一项，不把同一事实的操作要求拆成第二项。\n'

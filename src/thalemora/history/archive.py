@@ -212,4 +212,19 @@ class Archive:
 
     def import_history(self, events):
         """保留来源身份、缺失关系和验证状态；授权及版本规则逐条适用。"""
-        return [self.upsert(event) for event in events]
+        receipts = []
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            for event in events:
+                db.execute("SAVEPOINT history_import_event")
+                try:
+                    receipt = self._upsert(event, db)
+                except Exception:
+                    # 单条的正文/索引同进同退；此前成功项保留。
+                    db.execute("ROLLBACK TO history_import_event")
+                    db.execute("RELEASE history_import_event")
+                    db.commit()
+                    raise
+                db.execute("RELEASE history_import_event")
+                receipts.append(receipt)
+        return receipts

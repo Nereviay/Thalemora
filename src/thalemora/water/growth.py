@@ -27,7 +27,7 @@ from . import _keywords as keyword_policy
 
 
 PROPOSAL_KINDS = {"new_branch", "new_stream"}
-PROPOSERS = {"system", "agent", "user"}
+PROPOSERS = {"system", "agent", "chenlin", "user"}
 GENERIC_ANCHORS = {
     "事情",
     "生活",
@@ -53,7 +53,7 @@ def ensure(connection: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS water_growth_proposals (
             proposal_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            proposer TEXT NOT NULL CHECK(proposer IN ('system','agent','user')),
+            proposer TEXT NOT NULL CHECK(proposer IN ('system','agent','chenlin','user')),
             kind TEXT NOT NULL CHECK(kind IN ('new_branch','new_stream')),
             parent_node_id TEXT NOT NULL REFERENCES memory_water_nodes(node_id),
             title TEXT NOT NULL,

@@ -389,9 +389,12 @@ class RetrievalIndex:
     def refresh_memory_card(
         self,
         card_id: int,
+        *,
+        embedder=None,
     ) -> dict:
         """Refresh exactly one derived Memory chunk after a canonical revision."""
-        memory_db, embedder = self.memory_db_path, self.embedder
+        memory_db = self.memory_db_path
+        embedder = self.embedder if embedder is None else embedder
         cid = int(card_id)
         rows = [row for row in self._memory_rows(memory_db) if int(row["source_id"]) == cid]
         source_key = f"memory:{cid}"
