@@ -147,9 +147,9 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/list_agents", headers=self.admin).status_code, 200)
 
     def test_documented_host_inserts_before_fake_upstream_and_continues_on_failure(self):
-        doc = Path(__file__).resolve().parents[1] / "docs/P8_RECALL_CONNECTOR.md"
+        doc = Path(__file__).resolve().parents[1] / "docs/RECALL_API.md"
         namespace = {}
-        exec(compile(doc.read_text().split("```python\n", 1)[1].split("```", 1)[0], str(doc), "exec"), namespace)
+        exec(compile(doc.read_text().split("## Python 发送前示例", 1)[1].split("```python\n", 1)[1].split("```", 1)[0], str(doc), "exec"), namespace)
         self.insert("tea", "我喜欢乌龙茶")
         events, errors = [], []
         test = self

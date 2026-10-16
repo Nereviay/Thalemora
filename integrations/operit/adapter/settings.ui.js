@@ -14,7 +14,7 @@ function Screen(ctx) {
         ]),
         ctx.UI.TextField({ label: '洄海服务地址', placeholder: 'https://你的洄海地址', value: serviceUrl, onValueChange: setServiceUrl, singleLine: true }),
         ctx.UI.TextField({ label: '专用召回凭据（不是管理密钥）', value: recallToken, onValueChange: setRecallToken, singleLine: true, isPassword: true }),
-        ctx.UI.Text({ text: '设置保存在本机 Operit 私有配置中，不随插件包或聊天导出。需要含 P8 接口的洄海服务。', style: 'bodySmall' }),
+        ctx.UI.Text({ text: '设置保存在本机 Operit 私有配置中，不随插件包或聊天导出。请连接洄海 v0.7.0 服务。', style: 'bodySmall' }),
         ctx.UI.Button({ text: '保存设置', fillMaxWidth: true, onClick: () => {
             try {
                 const saved = settings.save({ enabled, serviceUrl, recallToken });
