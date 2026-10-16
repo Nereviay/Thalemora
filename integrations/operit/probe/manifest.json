@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "org.thalemora.operit_probe",
+  "version": "0.1.0",
+  "api_version": "1.0.0",
+  "main": "main.js",
+  "display_name": {
+    "zh": "洄海接入探针（合成测试）",
+    "en": "Thalemora synthetic probe"
+  },
+  "description": {
+    "zh": "仅核验正常发送前附加固定标记；无网络、记忆库、账号或模型凭据。"
+  },
+  "enabled_by_default": false,
+  "subpackages": []
+}

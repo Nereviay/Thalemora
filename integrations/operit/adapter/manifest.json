@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "org.thalemora.operit_probe",
+  "version": "0.1.1",
+  "api_version": "1.0.0",
+  "main": "main.js",
+  "display_name": {
+    "zh": "洄海 Operit 接入实验",
+    "en": "Thalemora Operit experiment"
+  },
+  "description": {
+    "zh": "实验适配：通过统一受限 Recall 接口，仅在本轮请求附加资料，不修改历史。配置默认留空。"
+  },
+  "enabled_by_default": false,
+  "subpackages": []
+}

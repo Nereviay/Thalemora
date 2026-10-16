@@ -1,0 +1,2 @@
+exports.serviceUrl = '';
+exports.recallToken = '';
