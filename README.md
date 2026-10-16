@@ -1,126 +1,146 @@
 <div align="center">
 
-<img src="docs/assets/thalemora-header.svg" width="100%" alt="Thalemora · 洄海 — Memory & Continuity" />
+<img src="docs/assets/thalemora-header.svg" width="100%" alt="Thalemora · 洄海" />
 
-**洄海 · 让 AI 记得发生过什么，也理解经历如何延续。**
+**让 AI 记得过去，也让每一段记忆有迹可循。**
 
-源自念念长期运行实践的 **AI 记忆与连续性系统**。<br>
-连接原话证据、可修订的长期记忆与身份状态，让每一次回忆有出处。
+洄海（Thalemora）是一套**独立、开源、可自行部署的 AI 长期记忆系统**。  
+它帮你保存聊天原话、整理值得记住的事情，并在需要时找回相关经历。
 
-[![Version](https://img.shields.io/badge/version-0.6.0-2563eb?style=flat-square)](https://github.com/yuyu1838309000-cmd/Thalemora/tree/v0.6.0)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-334155?style=flat-square)](pyproject.toml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-334155?style=flat-square)](LICENSE)
-
-[核心能力](#核心能力) · [零基础安装](docs/GETTING_STARTED.md) · [快速开始](#快速开始) · [接入与文档](#接入与文档) · [来源与致谢](#来源与致谢)
+[第一次使用](docs/GETTING_STARTED.md) · [它能做什么](#它能做什么) · [怎样连接聊天软件](#怎样让-ai-在聊天中用上记忆) · [下载 v0.6.0](https://github.com/yuyu1838309000-cmd/Thalemora/releases/tag/v0.6.0)
 
 </div>
 
-## 核心能力
+---
 
-洄海把记忆分成三个相互连接的部分：**发生过什么、值得长期记住什么、这些经历如何延续**。
+## 为什么做洄海？
 
-| 能力 | 作用 |
-| :--- | :--- |
-| **原话与证据** | 按授权保存历史原话和来源，记录时间、编辑与删除状态；记忆可以回查证据。 |
-| **可修订记忆** | 管理补充、更正与替代，保留修订链和字段来源，保护人工维护的内容。 |
-| **水系与经历** | 通过湖、溪流、支流组织故事线；Scene 核心按经历片段组织记忆候选。 |
-| **身份与内在世界** | 管理 Self Model、Persona、情绪、日记、梦境、低语和反思；本人创作与自我修订需要可信 Agent 事件。 |
-| **多 Agent 与跨应用** | 隔离身份、数据与检索；同一 Agent 的应用来源经过授权后可以共享档案。 |
-| **本地优先** | 无模型 Key 可导入、浏览、原话检索和人工管理记忆；云端模型按用途配置，付费调用默认关闭。 |
+你可能和 AI 聊过很多事情：养的宠物、正在做的项目、一次重要的决定，或一段不想反复解释的经历。
 
-### 0.6.0 可以做什么
+换了聊天窗口之后，这些事情不应该只能靠你一遍遍重讲。
 
-- **独立运行**：中文 Web 管理台、Python、HTTP、九工具 MCP，以及 Docker Compose。
-- **原话与人工记忆**：授权历史导入、检索、Memory / Water、修订链与来源证据。
-- **后台自动整理**：按用途配置模型后，独立 worker 串行运行 Scene-first Writer → Gatekeeper → Memory → Reflection；前台回复无需等待维护模型。
-- **人工优先与可追溯**：人工卡参与关系判断但保持只读，同条冲突不平行复制；Writer 区分事实、当次指令与长期偏好。
-- **预算与恢复**：默认不调用模型；调用次数/实际 usage 审计、持久进度、重启去重、明确失败后退出；全量历史与停写快照可导出恢复。
-- **宿主接入**：提供念念存储、历史增量和可信 Self Model 适配；普通独立使用不需要安装念念。
+**洄海想做的，是让记忆不止是一张张孤立的卡片，而是一段可以继续发展的经历。**
 
-自动整理的配置、启动和费用边界见 [后台记忆使用说明](docs/PRE6_4B_USAGE.md)。无 Key 时仍可导入、检索和人工管理。Agent 本人创作与自我修订仍需可信宿主事件，本地向量检索需宿主提供 embedder；这些能力不由 worker 假冒。
+举个例子：
 
-有限真实模型小测和念念接入已验；独立 worker 另以本地假模型验证后台进程、持久化和重启去重，不把这些证据写成所有模型/设备的质量、长期稳定或性能保证。Windows 原生 Python 与 Linux Docker 的 v0.5.0 首装已补验，手机独立首装与长时后台仍暂缓。
+> 你告诉 AI：“我家的猫叫豆包，它特别喜欢趴在窗台晒太阳。”  
+>  
+> 后来你又说：“豆包最近不睡窗台了，天天钻我被窝。”  
+>  
+> 洄海可以保存两次对话的原话；开启自动整理后，还可以判断这是不是同一件事的后续变化，而不是简单地堆两条互不相关的记录。
+>
+> 以后想起豆包时，可以查到相关记忆，也能回头看当时究竟说了什么。
 
-### 数据如何连接
+**要让 AI 在每轮聊天前自动拿到这些记忆，还需要聊天软件接入召回流程。** 洄海目前提供搜索和连接接口，但独立版尚未提供适用于所有聊天软件的即装即用自动注入。
+
+## 它能做什么？
+
+| 能力 | 对你意味着什么 |
+| --- | --- |
+| **留住原话** | 保存经你授权的聊天历史；想确认某件事时，可以找到当时的说法。 |
+| **整理长期记忆** | 把重要的事实、偏好、约定和经历保存下来，而不是每句话都变成永久记忆。 |
+| **让记忆可以更新** | 新变化可以补充、纠正或替代旧内容；保留修改记录，不随意覆盖你亲自写下的记忆。 |
+| **把经历串起来** | 用“海、湖、溪流、支流”组织持续的故事线；暂未分类的记忆也能保存和查找。 |
+| **为不同 AI 分开保管** | 可以为多个 AI 建立各自的记忆空间；经过授权，同一个 AI 也可以连接不同应用的历史。 |
+| **自己掌握数据** | 可以在自己的电脑或服务器运行，导入、导出和备份；无需把私人聊天放进公开仓库。 |
+
+洄海还提供 AI 的自我认识、情绪状态、日记、梦境和反思等基础管理能力。涉及 AI 本人创作或修改自我认识的内容，需要连接能够提供真实行为记录的聊天系统，不会由后台程序冒充 AI 完成。
+
+## 记忆是怎样工作的？
 
 ```mermaid
-flowchart TD
-  H["授权原话档案"] -->|"来源与证据"| M["Memory · Scene · Water"]
-  H --> R["检索与连续性候选"]
-  M --> R
-  I["Self Model · 内在状态"] --> R
-  R -->|"宿主集成"| A["AI Agent / 应用"]
-  A -->|"授权事件"| H
+flowchart LR
+    A["保存聊天原话"] --> B["整理值得记住的经历"]
+    B --> C["长期记忆"]
+    A --> D["搜索历史与记忆"]
+    C --> D
+    D --> E["交给已连接的聊天应用使用"]
 ```
 
-图中表示领域之间的数据关系。洄海提供记忆和连续性材料，宿主应用负责聊天、上下文组装与工具执行。
+- **保存：** 导入已有聊天记录，或由支持的聊天应用持续同步新消息。
+- **整理：** 你可以手动保存记忆；也可以自行配置模型，让后台定期提炼值得长期保留的内容。
+- **查找：** 通过管理台、接口或聊天工具，检索记忆和历史原话，查看它们的来源。
 
-## 快速开始
+自动整理默认关闭，不配置模型也能浏览、搜索和人工管理记忆。启用模型后可能产生你所选服务商的费用，可以设置调用预算。
 
-**第一次安装、不会用终端？** 先看 [普通用户安装与第一次使用](docs/GETTING_STARTED.md)，按 [Windows](docs/INSTALL_WINDOWS.md) / [Linux](docs/INSTALL_LINUX.md) / [Android 手机试装（尚未一键安装）](docs/INSTALL_ANDROID.md) 分流；安装难点已记入 [简化清单](docs/INSTALL_FRICTION.md)。
+## 怎样让 AI 在聊天中用上记忆？
 
-需要 **Python 3.10+**。首次启动无需模型 Key。
+这是最重要的使用区别：
+
+| 连接方式 | 目前能做到什么 |
+| --- | --- |
+| **打开洄海管理台** | 自己查看、查找、整理记忆，不依赖聊天软件。 |
+| **连接 MCP 记忆工具** | AI 可以调用工具查历史和记忆，但是否调用由聊天软件和模型决定。 |
+| **聊天应用主动接入洄海接口** | 应用可以在生成回复前先取回相关记忆，再放进该轮聊天的上下文。需要应用端进行对接。 |
+
+**当前 v0.6.0 尚未提供适用于普通聊天软件的通用自动召回插件。** 仅填写 MCP 地址，不意味着每轮聊天都会自动回忆；聊天记录也不会凭空自动同步。
+
+我们希望最终实现的是：**正常发消息，相关记忆在需要时自然出现，不需要用户反复提醒 AI 去查。** 这是后续接入体验的重点，不能把目标写成现有功能。
+
+## 现在可以开始体验吗？
+
+**可以。** 公开版 **v0.6.0** 已支持：
+
+- 中文网页管理台，浏览、导入、搜索聊天原话与记忆。
+- 手动保存和修改记忆，查看依据与历史版本，整理水系。
+- 为不同 AI 分开管理资料，并授权聊天来源。
+- 配置模型后启动后台自动整理；不配置也能使用基础功能。
+- 通过 Python、HTTP 或 MCP 与其他软件连接，以及导出、备份和恢复数据。
+
+**目前的使用门槛：** 需要自行安装 Python 环境或使用 Docker。Windows 的 Python 安装、Linux 的 Docker 安装已有实测；只有 Android 手机的完整独立安装和长期后台运行仍待验证，暂时没有一键安装包。
+
+### 新手从这里开始
+
+1. 阅读 [第一次使用洄海](docs/GETTING_STARTED.md)，按设备选择教程：[Windows](docs/INSTALL_WINDOWS.md) / [Linux 与服务器](docs/INSTALL_LINUX.md) / [Android 试装与限制](docs/INSTALL_ANDROID.md)。
+2. 启动洄海，在浏览器打开本机管理台，注册一个 AI 并授权数据来源。
+3. 先导入[练习聊天记录](docs/examples/p4_history.json)，试着搜索一句原话、保存一条记忆、查看来源。**不需要先购买模型 API。**
+
+<details>
+<summary><strong>熟悉命令行？展开快速安装</strong></summary>
+
+需要 Python 3.10 或更新版本。以下是 Linux/macOS 终端示例；Windows 请按上方单独教程操作。
 
 ```bash
 git clone --depth 1 --branch v0.6.0 https://github.com/yuyu1838309000-cmd/Thalemora.git
 cd Thalemora
-
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -c requirements.lock .
-
 export THALEMORA_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 printf '%s\n' "$THALEMORA_TOKEN"
 thalemora --data ./state serve
 ```
 
-打开 **http://127.0.0.1:8765**，填入终端输出的管理 token，然后：
+打开 `http://127.0.0.1:8765`，使用终端显示的管理密钥登录。该密钥能管理整个实例，**不要分享给他人**。启动时不会自动下载模型或产生模型调用费用。
 
-1. 注册一个 Agent。
-2. 授权来源 `demo-app` 和通道 `main`。
-3. 导入 [合成历史示例](docs/examples/p4_history.json)，开始浏览、检索与整理记忆。
-
-管理 token 具有实例所有者权限；私人通道需要单独授权。模型不会在启动时自动下载或调用。
-
-<details>
-<summary><strong>使用 Docker Compose</strong></summary>
-
-克隆仓库并设置上面的 `THALEMORA_TOKEN` 后，执行：
-
-```bash
-docker compose -f deploy/compose.yaml up --build -d
-```
-
-默认地址仍为 `http://127.0.0.1:8765`，数据保存在独立命名卷中。容器模型配置、日志及停止写入后的备份恢复见 [使用手册](docs/P4_USAGE.md)。
+Docker 安装、后台整理设置和备份方法见下方使用文档。
 
 </details>
 
-## 接入与文档
+## 更多资料
 
-| 入口 | 适合的用途 | 文档 |
-| :--- | :--- | :--- |
-| **Web 管理台** | 导入历史、检索原话、整理记忆与查看状态 | [使用手册](docs/P4_USAGE.md) |
-| **Python** | 领域核心、宿主证据与自我模型接线 | [应用 API](src/thalemora/app/service.py) · [合成宿主示例](tests/test_p3_inner_world.py) |
-| **HTTP** | 通过 token 认证访问本地管理 API | [接口与参数](docs/P4_USAGE.md#python--http--mcp) |
-| **MCP** | 本地 stdio / Streamable HTTP 的 9 项受保护工具 | [MCP 配置](docs/P4_USAGE.md#python--http--mcp) |
-| **导出与恢复** | 搬运授权历史、停止写入后制作和还原完整快照 | [恢复说明](docs/P4_USAGE.md#全量历史导出与恢复) |
-| **维护与升级** | 版本兼容、日常检查、备份安排与故障回退 | [维护约定](docs/MAINTENANCE.md) |
+| 想了解什么 | 去哪里看 |
+| --- | --- |
+| 第一次使用与界面操作 | [新手指南](docs/GETTING_STARTED.md) |
+| 后台自动整理记忆 | [自动记忆使用说明](docs/PRE6_4B_USAGE.md) |
+| 接口、MCP 和程序接入 | [完整使用手册](docs/P4_USAGE.md) |
+| 已知安装难点 | [安装限制与改进清单](docs/INSTALL_FRICTION.md) |
+| 更新、备份与恢复 | [维护与恢复说明](docs/MAINTENANCE.md) |
+| 公开版本 | [GitHub Releases](https://github.com/yuyu1838309000-cmd/Thalemora/releases) |
 
-## 来源与致谢
+## 开源与致谢
 
-记忆设计重点参考了 [Yinglianchun/Ombre-Brain](https://github.com/Yinglianchun/Ombre-Brain) 的二次开发与上游 [Ombre Brain](https://github.com/P0luz/Ombre-Brain)。生命周期评分中的三天分段时间与情绪加权规则继承自这些实现；原作者版权和 MIT 许可已保留在 [第三方声明](THIRD_PARTY_NOTICES.md)。
+洄海采用 [Apache License 2.0](LICENSE) 开源。
 
-也感谢 [Serein](https://github.com/Yinglianchun/Serein)、[Haven-Ombre](https://github.com/Yinglianchun/Haven-Ombre)、[Paramecium](https://github.com/Shitsuten/paramecium) 与 [awesome-ai-companion](https://github.com/DasterProkio/awesome-ai-companion) 提供的研究与开源参考。
+记忆设计参考了 [Yinglianchun/Ombre-Brain](https://github.com/Yinglianchun/Ombre-Brain) 及其上游 [Ombre Brain](https://github.com/P0luz/Ombre-Brain)，也参考了 [Serein](https://github.com/Yinglianchun/Serein)、[Haven-Ombre](https://github.com/Yinglianchun/Haven-Ombre)、[Paramecium](https://github.com/Shitsuten/paramecium) 等项目。继承的设计、原作者版权和第三方许可证均在 [第三方声明](THIRD_PARTY_NOTICES.md) 中说明。
 
-| 协作 | 贡献 |
-| :--- | :--- |
-| **小鱼** | 项目发起与维护，产品方向、需求定义和最终验收。 |
-| **ChatGPT（老大）** | AI 协作助手，参与方案审查、文档整理、开发与验证。 |
+**项目发起与维护：** 小鱼（产品方向、需求与验收）  
+**AI 协作：** ChatGPT（老大）（方案、开发协助、审查与文档）
 
 ---
 
 <div align="center">
 
-[Apache License 2.0](LICENSE) · [第三方许可与来源](THIRD_PARTY_NOTICES.md)
+**让过去的对话，成为未来仍然有用的记忆。**
 
 </div>
