@@ -57,7 +57,7 @@ flowchart TD
 
 ## 快速开始
 
-**不确定手机、电脑或服务器该怎么装、聊天软件能否自动使用记忆？** 先看 [按设备与接入方式选择](docs/CHOOSE_YOUR_SETUP.md)。
+**不确定手机、电脑或服务器该怎么装、聊天软件能否自动使用记忆？** 先看 [按设备与接入方式选择](docs/CHOOSE_YOUR_SETUP.md)。**安装成功、MCP 可调用、聊天前自动注入、新消息自动同步，是四个不同的状态。**
 
 **第一次安装、不会用终端？** 再看 [普通用户安装与第一次使用](docs/GETTING_STARTED.md)，按 [Windows](docs/INSTALL_WINDOWS.md) / [Linux](docs/INSTALL_LINUX.md) / [Android 手机试装（尚未一键安装）](docs/INSTALL_ANDROID.md) 分流；安装难点已记入 [简化清单](docs/INSTALL_FRICTION.md)。
 
