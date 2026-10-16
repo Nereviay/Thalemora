@@ -1,0 +1,8 @@
+{
+  "display_name": "Thalemora 聊天前召回试验",
+  "author": "Thalemora",
+  "version": "0.1.0",
+  "loading_order": 100,
+  "js": "index.js",
+  "generate_interceptor": "thalemoraRecallInterceptor"
+}

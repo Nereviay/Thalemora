@@ -1,12 +1,14 @@
 """HTTP 只负责认证、参数和服务接线；无外部 principal/actor 身份入口。"""
 import hmac
 import json
+import os
 from functools import partial
 import anyio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 from starlette.routing import Route, Mount
@@ -155,10 +157,15 @@ def create_http(service, token):
         except Exception:
             return failure(500, "recall_failed")
 
-    return Starlette(routes=[Route("/health", health),
+    app = Starlette(routes=[Route("/health", health),
                              Route("/api/recall", recall, methods=["GET", "POST"]),
                              Route("/api/{operation}", endpoint, methods=["GET", "POST"]),
                              Route("/mcp", protected_mcp),
                              Route("/mcp/", protected_mcp),
                              Mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True))],
                      lifespan=lifespan)
+    # 仅在管理员显式指定可信网页 Origin 时，允许浏览器连接本地召回。
+    if origin := os.environ.get("THALEMORA_RECALL_CORS_ORIGIN"):
+        app.add_middleware(CORSMiddleware, allow_origins=[origin],
+                           allow_methods=["POST"], allow_headers=["Authorization", "Content-Type"])
+    return app
