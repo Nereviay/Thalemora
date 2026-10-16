@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-334155?style=flat-square)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-334155?style=flat-square)](LICENSE)
 
-[核心能力](#核心能力) · [零基础安装](docs/GETTING_STARTED.md) · [快速开始](#快速开始) · [接入与文档](#接入与文档) · [来源与致谢](#来源与致谢)
+[先选适合你的用法](docs/CHOOSE_YOUR_SETUP.md) · [零基础安装](docs/GETTING_STARTED.md) · [快速开始](#快速开始) · [接入与文档](#接入与文档) · [来源与致谢](#来源与致谢)
 
 </div>
 
@@ -57,7 +57,9 @@ flowchart TD
 
 ## 快速开始
 
-**第一次安装、不会用终端？** 先看 [普通用户安装与第一次使用](docs/GETTING_STARTED.md)，按 [Windows](docs/INSTALL_WINDOWS.md) / [Linux](docs/INSTALL_LINUX.md) / [Android 手机试装（尚未一键安装）](docs/INSTALL_ANDROID.md) 分流；安装难点已记入 [简化清单](docs/INSTALL_FRICTION.md)。
+**不确定手机、电脑或服务器该怎么装、聊天软件能否自动使用记忆？** 先看 [按设备与接入方式选择](docs/CHOOSE_YOUR_SETUP.md)。
+
+**第一次安装、不会用终端？** 再看 [普通用户安装与第一次使用](docs/GETTING_STARTED.md)，按 [Windows](docs/INSTALL_WINDOWS.md) / [Linux](docs/INSTALL_LINUX.md) / [Android 手机试装（尚未一键安装）](docs/INSTALL_ANDROID.md) 分流；安装难点已记入 [简化清单](docs/INSTALL_FRICTION.md)。
 
 需要 **Python 3.10+**。首次启动无需模型 Key。
 
@@ -99,6 +101,7 @@ docker compose -f deploy/compose.yaml up --build -d
 
 | 入口 | 适合的用途 | 文档 |
 | :--- | :--- | :--- |
+| **先选使用方式** | 设备、客户端能力、自动召回限制、功能版本差异 | [我该怎么使用洄海？](docs/CHOOSE_YOUR_SETUP.md) |
 | **Web 管理台** | 导入历史、检索原话、整理记忆与查看状态 | [使用手册](docs/P4_USAGE.md) |
 | **Python** | 领域核心、宿主证据与自我模型接线 | [应用 API](src/thalemora/app/service.py) · [合成宿主示例](tests/test_p3_inner_world.py) |
 | **HTTP** | 通过 token 认证访问本地管理 API | [接口与参数](docs/P4_USAGE.md#python--http--mcp) |
