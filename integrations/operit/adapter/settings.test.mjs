@@ -34,7 +34,7 @@ test('配置持久化后新宿主读取，开关控制实际召回和当轮注�
     const restarted = host(first.store), main = restarted.load('main.js');
     main.registerToolPkg();
     assert.equal(restarted.registrations.ui.runtime, 'compose_dsl');
-    assert.equal(typeof restarted.registrations.ui.screen, 'function');
+    assert.equal(restarted.registrations.ui.screen, 'settings.ui.js');
     const result = await restarted.registrations.hook.function(input);
     assert.match(result.processedInput, /乌龙茶/);
     assert.equal(restarted.requests[0].url, 'https://recall.invalid/api/recall');

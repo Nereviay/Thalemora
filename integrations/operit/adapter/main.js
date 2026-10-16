@@ -36,7 +36,7 @@ async function onPromptFinalize(input) {
 function registerToolPkg() {
     ToolPkg.registerToolboxUiModule({
         id: 'thalemora_settings', runtime: 'compose_dsl',
-        screen: require('./settings.ui.js').default,
+        screen: 'settings.ui.js',
         title: { zh: '洄海 · 自动召回', en: 'Thalemora Recall' }
     });
     ToolPkg.registerPromptFinalizeHook({ id: 'thalemora_recall', function: onPromptFinalize });
