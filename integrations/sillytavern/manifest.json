@@ -1,8 +1,9 @@
 {
-  "display_name": "Thalemora 聊天前召回试验",
+  "display_name": "洄海 · 自动召回",
   "author": "Thalemora",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "loading_order": 100,
   "js": "index.js",
-  "generate_interceptor": "thalemoraRecallInterceptor"
+  "generate_interceptor": "thalemoraRecallInterceptor",
+  "minimum_client_version": "1.19.0"
 }

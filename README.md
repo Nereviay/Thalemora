@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-334155?style=flat-square)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-334155?style=flat-square)](LICENSE)
 
-[先选适合你的用法](docs/CHOOSE_YOUR_SETUP.md) · [零基础安装](docs/GETTING_STARTED.md) · [快速开始](#快速开始) · [接入与文档](#接入与文档) · [来源与致谢](#来源与致谢)
+[插件安装配置](docs/PLUGIN_SETUP.md) · [先选适合你的用法](docs/CHOOSE_YOUR_SETUP.md) · [零基础安装](docs/GETTING_STARTED.md) · [快速开始](#快速开始) · [接入与文档](#接入与文档) · [来源与致谢](#来源与致谢)
 
 </div>
 
@@ -47,7 +47,7 @@
 
 未发布的 P8 已在 Android 浏览器中的 SillyTavern 1.19.0 完成六场景自动注入验收；Operit 官方 v1.12.2 外部插件也完成真实洄海召回 → 实际模型请求的最小验证，界面保留用户原话。服务在服务器运行，使用合成数据与假模型；不代表纯手机首装或真实模型效果已验收。
 
-**公开 v0.6.0 尚不含这套召回接口或插件。** 两个适配仍需开发者配置，Operit 尚无图形配置页或正式包；本轮没有实现聊天后自动同步。已测版本与选型条件见 [接入指南](docs/CHOOSE_YOUR_SETUP.md#③-我的聊天软件兼容吗)。
+**公开 v0.6.0 尚不含这套召回接口或插件。** 插件 0.2.0 已增加设置界面与本地包，无需改源码；酒馆配置通过合成浏览器验证，Operit 新页面仍待原手机复验，见 [安装配置](docs/PLUGIN_SETUP.md)。尚未公开分发，也没有实现聊天后自动同步。已测版本与选型条件见 [接入指南](docs/CHOOSE_YOUR_SETUP.md#③-我的聊天软件兼容吗)。
 
 ### 数据如何连接
 

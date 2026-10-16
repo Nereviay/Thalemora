@@ -10,9 +10,12 @@ function host(fetch, immediateTimeout = false) {
     const prompts = {};
     const calls = [];
     const warnings = [];
+    const settings = { thalemora_recall: { enabled: true, serviceUrl: 'https://recall.invalid/' } };
+    const session = new Map([['thalemora_recall_token', 'synthetic-recall-token']]);
     let timerCleared = false;
     const sandbox = vm.createContext({
         AbortController,
+        sessionStorage: { getItem: key => session.get(key) || null },
         fetch: async (...args) => { calls.push(args); return fetch(...args); },
         console: { warn: message => warnings.push(message) },
         setTimeout: (callback, delay) => {
@@ -22,17 +25,15 @@ function host(fetch, immediateTimeout = false) {
         },
         clearTimeout: () => { timerCleared = true; },
         SillyTavern: { getContext: () => ({
+            extensionSettings: settings,
             setExtensionPrompt(key, value, position, depth, scan = false, role = 0, filter = null) {
                 prompts[key] = { value: String(value), position, depth, scan, role, filter };
             },
         }) },
     });
     vm.runInContext(source, sandbox);
-    Object.assign(sandbox.thalemoraRecallConfig, {
-        serviceUrl: 'https://recall.invalid/', recallToken: 'synthetic-recall-token',
-    });
     return {
-        calls, prompts, warnings,
+        calls, prompts, warnings, settings, session,
         get timerCleared() { return timerCleared; },
         async generate(chat) {
             const before = structuredClone(chat);
@@ -123,9 +124,24 @@ test('未配置、无用户消息和超过接口长度时跳过，不截断问�
     await adapter.generate([user('字'.repeat(201))]);
     // 新页面默认未配置，仍可正常聊天。
     const sandbox = vm.createContext({
-        SillyTavern: { getContext: () => ({ setExtensionPrompt() {} }) },
+        SillyTavern: { getContext: () => ({ extensionSettings: {}, setExtensionPrompt() {} }) },
     });
     vm.runInContext(source, sandbox);
     await sandbox[manifest.generate_interceptor]([user('茶')], 4096, () => assert.fail(), 'normal');
     assert.equal(adapter.calls.length, 0);
+});
+
+test('保存开关和标签页凭据决定召回，不使用管理设置存储 token', async () => {
+    const adapter = host(async () => ok('乌龙茶'));
+    adapter.settings.thalemora_recall.enabled = false;
+    await adapter.generate([user('茶')]);
+    assert.equal(adapter.calls.length, 0);
+    adapter.settings.thalemora_recall.enabled = true;
+    adapter.session.clear();
+    await adapter.generate([user('茶')]);
+    assert.equal(adapter.calls.length, 0);
+    adapter.session.set('thalemora_recall_token', 'new-synthetic-token');
+    await adapter.generate([user('茶')]);
+    assert.equal(adapter.calls.at(-1)[1].headers.Authorization, 'Bearer new-synthetic-token');
+    assert.equal('recallToken' in adapter.settings.thalemora_recall, false);
 });

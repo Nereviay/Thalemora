@@ -1,13 +1,14 @@
 // Operit v1.12.2：只修改本轮实际发送文字，不改界面或持久历史。
-const config = require('./config.js');
+const settings = require('./settings.js');
 async function onPromptFinalize(input) {
     const event = input.eventPayload || {};
     if (String(event.stage || input.eventName || '') !== 'before_send_to_model') return null;
-    if (!config.serviceUrl || !config.recallToken) return null;
     const message = String(event.rawInput || event.processedInput || '');
     if (!message.trim() || Array.from(message).length > 200) return null;
     const started = Date.now();
     try {
+        const config = settings.load();
+        if (!config.enabled || !config.serviceUrl || !config.recallToken) return null;
         const response = await Tools.Net.http({
             url: config.serviceUrl.replace(/\/$/, '') + '/api/recall',
             method: 'POST',
@@ -33,6 +34,11 @@ async function onPromptFinalize(input) {
     }
 }
 function registerToolPkg() {
+    ToolPkg.registerToolboxUiModule({
+        id: 'thalemora_settings', runtime: 'compose_dsl',
+        screen: require('./settings.ui.js').default,
+        title: { zh: '洄海 · 自动召回', en: 'Thalemora Recall' }
+    });
     ToolPkg.registerPromptFinalizeHook({ id: 'thalemora_recall', function: onPromptFinalize });
     return true;
 }
