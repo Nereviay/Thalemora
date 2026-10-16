@@ -26,6 +26,8 @@ class Application:
     def __init__(self, root, *, host_reader=None, embedder=None, reranker=None):
         self.registry = IdentityRegistry(root)
         self.owner = OwnerPrincipal("local-owner")
+        from .recall_tokens import RecallTokens
+        self.recall_tokens = RecallTokens(self.registry, self.owner)
         self.host_reader = host_reader
         self.embedder = embedder
         from .providers import Providers
@@ -252,9 +254,15 @@ class Application:
                               memory_db_path=str(path), embedding_model=model, embedder=embedder)
 
     def recall_for_turn(self, agent_id, app_id, query, channel="main", **visible):
-        """仅 Python 入口；HTTP/客户端接线留给 P8-3。"""
+        """共享的本轮召回核心，HTTP 只做凭据与协议接线。"""
         from thalemora.retrieval.recall import recall_for_turn
         return recall_for_turn(self, agent_id, app_id, query, channel, **visible)
+
+    def issue_recall_token(self, agent_id, app_id, channel="main"):
+        return self.recall_tokens.issue(agent_id, app_id, channel)
+
+    def revoke_recall_token(self, token_id):
+        return self.recall_tokens.revoke(token_id)
 
     def build_local_index(self, agent_id, app_id, channel="main"):
         return self.local_index(agent_id, app_id, channel).rebuild_memory()

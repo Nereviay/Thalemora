@@ -1,6 +1,8 @@
 """HTTP 只负责认证、参数和服务接线；无外部 principal/actor 身份入口。"""
 import hmac
 import json
+from functools import partial
+import anyio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,6 +14,9 @@ from starlette.staticfiles import StaticFiles
 
 from .providers import ProviderUnavailable
 from .mcp import create_mcp
+from .recall_tokens import InvalidRecallToken
+
+RECALL_TIMEOUT_SECONDS = 5
 
 
 def create_http(service, token):
@@ -43,7 +48,8 @@ def create_http(service, token):
     reads.update(provider_status=service.providers.status, usage=service.providers.audit)
     writes = {name: getattr(service, name) for name in (
         "register_agent", "grant_source", "import_history", "remember", "water_node", "water_move",
-        "configure_persona", "reflect", "continuity", "build_local_index")}
+        "configure_persona", "reflect", "continuity", "build_local_index",
+        "issue_recall_token", "revoke_recall_token")}
     writes.update(configure_provider=service.providers.configure, call_provider=service.providers.call)
 
     async def endpoint(request):
@@ -89,7 +95,68 @@ def create_http(service, token):
     async def health(request):
         return JSONResponse({"status": "ok"})
 
+    async def recall(request):
+        if request.method != "POST":
+            return JSONResponse({"error": "method_not_allowed"}, status_code=405,
+                                headers={"Allow": "POST"})
+
+        def failure(status, code):
+            return JSONResponse({"error": code}, status_code=status)
+
+        async def execute():
+            authorization = request.headers.get("authorization", "")
+            if not authorization.startswith("Bearer "):
+                raise InvalidRecallToken()
+            scope = await anyio.to_thread.run_sync(
+                partial(service.recall_tokens.resolve, authorization[7:]), abandon_on_cancel=True)
+            chunks = bytearray()
+            async for chunk in request.stream():
+                chunks.extend(chunk)
+                if len(chunks) > 1024 * 1024:
+                    return failure(413, "request_too_large")
+            args = json.loads(chunks)
+            allowed = {"message", "visible_memory_ids", "visible_archive_ids", "visible_texts"}
+            if not isinstance(args, dict) or set(args) - allowed or "message" not in args:
+                return failure(400, "invalid_request")
+            if not isinstance(args["message"], str) or len(args["message"]) > 200:
+                return failure(400, "invalid_message")
+            for key, item_type in (("visible_memory_ids", int), ("visible_archive_ids", str),
+                                   ("visible_texts", str)):
+                if key in args and (not isinstance(args[key], list) or
+                                    any(type(v) is not item_type for v in args[key])):
+                    return failure(400, "invalid_visible_items")
+            message = args.pop("message")
+            result = await anyio.to_thread.run_sync(
+                partial(service.recall_for_turn, **scope, query=message, **args), abandon_on_cancel=True)
+            if result["errors"] and not result.get("rendered"):
+                return failure(503, "recall_unavailable")
+            # 可选 Rerank 出错仍可使用基础召回，不能让它拖垮整轮消息。
+            warnings = ["rerank_unavailable"] if result["errors"] else []
+            # 仅输出插入文本及引用标识，不透传内部 score、正文或异常。
+            refs = {kind: [{k: item[k] for k in fields if k in item} for item in result[kind]]
+                    for kind, fields in (("memories", ("id", "revision_id")),
+                                         ("archive", ("id", "version")))}
+            return JSONResponse(dict(rendered=result["rendered"], **refs,
+                                     empty=not bool(result["rendered"]), errors=warnings))
+
+        try:
+            with anyio.fail_after(RECALL_TIMEOUT_SECONDS):
+                return await execute()
+        except InvalidRecallToken:
+            return failure(401, "invalid_recall_token")
+        except PermissionError:
+            return failure(403, "source_not_authorized")
+        except (ValueError, TypeError):
+            return failure(400, "invalid_request")
+        except TimeoutError:
+            return failure(504, "recall_timeout")
+        except ProviderUnavailable:
+            return failure(503, "recall_unavailable")
+        except Exception:
+            return failure(500, "recall_failed")
+
     return Starlette(routes=[Route("/health", health),
+                             Route("/api/recall", recall, methods=["GET", "POST"]),
                              Route("/api/{operation}", endpoint, methods=["GET", "POST"]),
                              Route("/mcp", protected_mcp),
                              Route("/mcp/", protected_mcp),
