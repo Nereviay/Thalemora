@@ -23,13 +23,17 @@ def plain(value):
 
 
 class Application:
-    def __init__(self, root, *, host_reader=None, embedder=None):
+    def __init__(self, root, *, host_reader=None, embedder=None, reranker=None):
         self.registry = IdentityRegistry(root)
         self.owner = OwnerPrincipal("local-owner")
         self.host_reader = host_reader
         self.embedder = embedder
         from .providers import Providers
         self.providers = Providers(self.registry.root)
+        if embedder is not None:
+            self.providers.local_models["embedding"] = embedder
+        if reranker is not None:
+            self.providers.local_models["rerank"] = reranker
 
     def list_agents(self, *, limit=20, offset=0):
         self.page(limit, offset)
@@ -247,6 +251,11 @@ class Application:
         return RetrievalIndex(str(path.with_name(f"retrieval_{channel}.sqlite")),
                               memory_db_path=str(path), embedding_model=model, embedder=embedder)
 
+    def recall_for_turn(self, agent_id, app_id, query, channel="main", **visible):
+        """仅 Python 入口；HTTP/客户端接线留给 P8-3。"""
+        from thalemora.retrieval.recall import recall_for_turn
+        return recall_for_turn(self, agent_id, app_id, query, channel, **visible)
+
     def build_local_index(self, agent_id, app_id, channel="main"):
         return self.local_index(agent_id, app_id, channel).rebuild_memory()
 
@@ -314,5 +323,5 @@ class Application:
                     autonomous_write="需连接可信 Agent 宿主；HTTP 不接受自报角色或事件正文",
                     lexical="历史原文 1–2 字符 Btree 短 gram，3–200 字符 FTS5 trigram",
                     local_vector="ready" if self.embedder else "unconfigured",
-                    models=[self.providers.status(m) for m in ("embedding", "writer", "gatekeeper", "reflection")],
+                    models=[self.providers.status(m) for m in ("embedding", "rerank", "writer", "gatekeeper", "reflection")],
                     backup="停止所有写入后使用 thalemora backup/restore；目标必须为新空目录")

@@ -483,7 +483,7 @@ class RetrievalIndex:
             batch_size=batch_size,
         )
 
-    def _lexical_hits(self, query: str, source_kind: str, limit: int) -> list[tuple[str, float]]:
+    def _lexical_hits(self, query: str, source_kind: str, limit: int, *, literal=False) -> list[tuple[str, float]]:
         query = str(query or "").strip()
         if not query:
             return []
@@ -494,10 +494,10 @@ class RetrievalIndex:
                 "FROM chunks_fts JOIN chunks c ON c.source_key=chunks_fts.source_key "
                 "WHERE chunks_fts MATCH ? AND c.source_kind=? "
                 "ORDER BY score LIMIT ?",
-                (query, source_kind, int(limit)),
+                ('"' + query.replace('"', '""') + '"' if literal else query, source_kind, int(limit)),
             ).fetchall()
             hits.extend((row["source_key"], float(row["score"])) for row in rows)
-            if len(query) >= 2:
+            if len(query) >= 2 or literal:
                 like_rows = conn.execute(
                     "SELECT source_key FROM chunks WHERE source_kind=? AND text LIKE ? LIMIT ?",
                     (source_kind, f"%{query}%", int(limit)),
@@ -550,9 +550,14 @@ class RetrievalIndex:
             order = idx[np.argsort(-scores[idx])]
         return [(keys[int(i)], float(scores[int(i)])) for i in order[:n]]
 
-    def search(self, query: str, *, top_k: int=8, pool: int=40) -> list[dict]:
+    def search(self, query: str, *, top_k: int=8, pool: int=40, lexical_queries: Sequence[str] | None=None) -> list[dict]:
         source_kind, embedder = 'memory_card', self.embedder
-        lexical = self._lexical_hits(query, source_kind, pool)
+        if lexical_queries is None:
+            lexical = self._lexical_hits(query, source_kind, pool)
+        else:
+            lexical = list(dict.fromkeys(key for term in lexical_queries
+                                        for key, _ in self._lexical_hits(term, source_kind, pool, literal=True)))[:pool]
+            lexical = [(key, 0.0) for key in lexical]
         vector = []
         if embedder is not None:
             vector = self._vector_hits(embedder.encode_one(query), source_kind, pool)

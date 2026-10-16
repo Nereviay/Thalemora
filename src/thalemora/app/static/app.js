@@ -128,10 +128,16 @@ function record(item, title, text) {
 function form(fields, button, submit) {
   const f = node("form");
   const elements = {};
-  for (const [key, label, type = "text", value = ""] of fields) {
+  for (const [key, label, type = "text", value = "", options = []] of fields) {
     const l = node("label", label);
-    const el = node(type === "textarea" ? "textarea" : "input");
-    if (type !== "textarea") el.type = type;
+    const el = node(type === "textarea" || type === "select" ? type : "input");
+    if (type === "select") {
+      for (const [value, label] of options) {
+        const option = node("option", label);
+        option.value = value;
+        el.append(option);
+      }
+    } else if (type !== "textarea") el.type = type;
     el.value = value;
     if (type !== "checkbox") el.required = true;
     l.append(el);
@@ -190,12 +196,36 @@ async function renderModels() {
       `调用尝试 ${config.calls} 次 · 返回 token ${config.actual_tokens ?? "未知"} · 费用未提供\n此入口仅做显式调用；不自动执行领域提炼。`,
     );
   }
+  for (const module of ["embedding", "rerank"]) {
+    const config = rows.find((r) => r.module === module).config;
+    const d = node("details");
+    d.append(node("summary", module === "embedding" ? "Embedding · 召回向量" : "Rerank · 候选重排"));
+    d.append(node("p", "本地使用宿主已提供的模型或已存在的模型目录，不自动下载。API 会发送查询和记忆候选到所配服务，按预算计数；Rerank 使用独立 /rerank 端点。切换 Embedding 模型后，下次召回自动重建向量索引。"));
+    const f = form([
+      ["mode", "模型方式", "select", config.mode || (config.enabled ? "api" : "disabled"), [["disabled", "关闭"], ["local", "本地模型"], ["api", "API"]]],
+      ["model", "本地模型标识或目录 / API 模型名", "text", config.model || ""],
+      ["base_url", "API base URL（自动追加 /embeddings 或 /rerank）", "text", config.base_url || ""],
+      ["key_env", "服务端 Key 环境变量名", "text", config.key_env || ""],
+      ["call_budget", "累计调用预算", "number", config.call_budget || 0],
+      ["token_budget", "累计 token 准入阈值", "number", config.token_budget || 0],
+    ], "保存 " + module, async (v) => {
+      v.module = module;
+      v.call_budget = Number(v.call_budget);
+      v.token_budget = Number(v.token_budget);
+      await api("configure_provider", v, true);
+      await load();
+      notice("配置已保存");
+    });
+    for (const input of f.querySelectorAll("input")) input.required = false;
+    d.append(f);
+    $("#tools").append(d);
+  }
   const d = node("details");
-  d.append(node("summary", "按用途配置 Provider"));
+  d.append(node("summary", "其他用途 Provider"));
   d.append(
     form(
       [
-        ["module", "用途：embedding / writer / gatekeeper / reflection"],
+        ["module", "用途：writer / gatekeeper / reflection"],
         ["base_url", "兼容 API base URL"],
         ["model", "模型名"],
         ["key_env", "服务端 Key 环境变量名"],
