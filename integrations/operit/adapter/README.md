@@ -4,8 +4,8 @@
 
 ## 安装
 
-1. 准备洄海 v0.7.0 服务，并按[插件教程](https://github.com/yuyu1838309000-cmd/Thalemora/blob/main/docs/PLUGIN_SETUP.md)签发专用召回凭据。
-2. 从 [Releases](https://github.com/yuyu1838309000-cmd/Thalemora/releases/latest) 下载 `thalemora-operit-0.2.0.toolpkg`，保存到手机。
+1. 准备洄海 v0.7.0 服务，并按[插件教程](https://github.com/Nereviay/Thalemora/blob/main/docs/PLUGIN_SETUP.md)签发专用召回凭据。
+2. 从 [Releases](https://github.com/Nereviay/Thalemora/releases/latest) 下载 `thalemora-operit-0.2.0.toolpkg`，保存到手机。
 3. 在 Operit 包管理页面选择「插件」分类，用导入文件功能选择该文件。不要选择只接收 js、ts、hjson 的脚本包分类。
 4. 启用插件，在工具箱打开「洄海 · 自动召回」。
 5. 填服务根地址和召回凭据，打开「启用聊天前召回」，点击「保存设置」。

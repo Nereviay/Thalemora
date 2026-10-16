@@ -1,6 +1,6 @@
 # 安装聊天插件
 
-v0.7.0 提供 **SillyTavern 和 Operit 插件适配**。两个插件版本均为 0.2.0，从[新版下载页](https://github.com/yuyu1838309000-cmd/Thalemora/releases/tag/v0.7.0)获取。
+v0.7.0 提供 **SillyTavern 和 Operit 插件适配**。两个插件版本均为 0.2.0，从[新版下载页](https://github.com/Nereviay/Thalemora/releases/tag/v0.7.0)获取。
 
 ## 先准备三样东西
 

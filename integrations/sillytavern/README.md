@@ -4,8 +4,8 @@
 
 ## 安装
 
-1. 准备洄海 v0.7.0 服务，并按[插件教程](https://github.com/yuyu1838309000-cmd/Thalemora/blob/main/docs/PLUGIN_SETUP.md)签发专用召回凭据。
-2. 从 [Releases](https://github.com/yuyu1838309000-cmd/Thalemora/releases/latest) 下载 `thalemora-sillytavern-0.2.0.zip`。
+1. 准备洄海 v0.7.0 服务，并按[插件教程](https://github.com/Nereviay/Thalemora/blob/main/docs/PLUGIN_SETUP.md)签发专用召回凭据。
+2. 从 [Releases](https://github.com/Nereviay/Thalemora/releases/latest) 下载 `thalemora-sillytavern-0.2.0.zip`。
 3. 解压到酒馆的 `data/<user-handle>/extensions/thalemora-recall/`。`manifest.json` 必须直接位于这个目录。
 4. 刷新酒馆，进入扩展设置，展开「洄海 · 自动召回」。
 5. 填服务根地址和召回凭据，勾选「启用聊天前召回」，点击「保存设置」。

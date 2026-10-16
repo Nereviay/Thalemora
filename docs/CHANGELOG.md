@@ -32,4 +32,4 @@
 - 支持记忆来源与修订、水系组织、数据备份和恢复。
 - 提供四项 stdio MCP 读取工具。
 
-旧版源代码和下载文件保留在 [GitHub Releases](https://github.com/yuyu1838309000-cmd/Thalemora/releases)。当前教程按 v0.7.0 编写。
+旧版源代码和下载文件保留在 [GitHub Releases](https://github.com/Nereviay/Thalemora/releases)。当前教程按 v0.7.0 编写。
