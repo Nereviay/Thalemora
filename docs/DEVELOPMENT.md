@@ -25,7 +25,7 @@ PYTHONPATH=src:tests python3 -m unittest test_p8_recall test_p8_connector
 node --test integrations/sillytavern/index.test.mjs integrations/operit/adapter/settings.test.mjs
 ```
 
-Python 测试依赖可用 `python -m pip install -c requirements.lock ".[test]"` 安装。包含网页操作的用例另需 Playwright 浏览器环境；普通 API 测试不需要浏览器。
+Python 3.10–3.15 均可使用同一份 `requirements.lock`，安装时会自动选择兼容当前 Python 的依赖，不需要为项目另装旧版 Python。测试依赖可用 `python -m pip install -c requirements.lock ".[test]"` 安装。包含网页操作的用例另需 Playwright 浏览器环境；普通 API 测试不需要浏览器。
 
 ## 打包插件
 

@@ -9,7 +9,7 @@ description = "洄海：独立记忆与连续性管理"
 license = "Apache-2.0"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.10"
-dependencies = ["starlette==1.3.1", "uvicorn==0.51.0", "mcp==1.28.1", "numpy==2.2.6", "jieba==0.42.1"]
+dependencies = ["starlette==1.3.1", "uvicorn==0.51.0", "mcp==1.28.1", "numpy==2.2.6; python_version < '3.14'", "numpy==2.5.4; python_version >= '3.14'", "jieba==0.42.1"]
 
 [project.optional-dependencies]
 test = ["httpx==0.28.1", "playwright==1.61.0"]
