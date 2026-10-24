@@ -2,6 +2,7 @@
 import math
 
 from thalemora.app.providers import ProviderUnavailable
+from .core import RetrievalShadowError
 
 
 def rerank_scores(results, count):
@@ -18,12 +19,30 @@ def rerank_scores(results, count):
     return scores
 
 
-class APIEmbedder:
-    def __init__(self, providers):
-        self.providers = providers
+class AvailableEmbedder:
+    """Host failures must be explicit; generic code/permission/DB errors propagate."""
+    def __init__(self, embedder):
+        self.embedder = embedder
+
+    def _invoke(self, method, *args, **kwargs):
+        try:
+            return getattr(self.embedder, method)(*args, **kwargs)
+        except (TimeoutError, ConnectionError) as exc:
+            raise ProviderUnavailable("embedding transport unavailable") from exc
 
     def encode_one(self, text):
-        return self.providers.call("embedding", text)["output"]
+        return self._invoke("encode_one", text)
+
+    def encode_many(self, texts, *, batch_size=16):
+        return self._invoke("encode_many", texts, batch_size=batch_size)
+
+
+class APIEmbedder:
+    def __init__(self, providers, config):
+        self.providers, self.config = providers, dict(config)
+
+    def encode_one(self, text):
+        return self.providers.call("embedding", text, expected_config=self.config)["output"]
 
     def encode_many(self, texts, *, batch_size=16):
         return [self.encode_one(text) for text in texts]
@@ -33,11 +52,19 @@ class LocalEmbedder:
     def __init__(self, model):
         self.model = model
 
+    def _encode(self, *args, **kwargs):
+        try:
+            return self.model.encode(*args, **kwargs)
+        except RetrievalShadowError:
+            raise  # known numerical/model violations are never optional outages
+        except (RuntimeError, TimeoutError, ConnectionError) as exc:
+            raise ProviderUnavailable("local embedding runtime unavailable") from exc
+
     def encode_one(self, text):
-        return self.model.encode(text)
+        return self._encode(text)
 
     def encode_many(self, texts, *, batch_size=16):
-        return self.model.encode(texts, batch_size=batch_size)
+        return self._encode(texts, batch_size=batch_size)
 
 
 def configured_model(providers, module):
@@ -52,7 +79,7 @@ def configured_model(providers, module):
     identity = f"{mode}:{config.get('base_url', '')}:{config['model']}"
     if mode == "api":
         if module == "embedding":
-            return identity, APIEmbedder(providers)
+            return identity, APIEmbedder(providers, config)
         return identity, lambda query, docs: rerank_scores(
             providers.call("rerank", query, documents=docs)["output"], len(docs))
     try:
@@ -68,6 +95,8 @@ def configured_model(providers, module):
             providers.local_models[module] = local
         providers.local_errors.pop(module, None)
         return identity, local[1]
-    except Exception as exc:
+    except (ImportError, OSError, RuntimeError) as exc:
+        if isinstance(exc, (PermissionError, RetrievalShadowError)):
+            raise
         providers.local_errors[module] = type(exc).__name__
         raise ProviderUnavailable(f"{module} local: {type(exc).__name__}") from exc

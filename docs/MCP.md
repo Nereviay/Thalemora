@@ -39,6 +39,8 @@ thalemora --data ./state serve
 
 先在管理台注册 AI、授权来源。工具调用仍需正确的 Agent ID、来源和通道。私人通道不会自动继承普通通道权限。
 
+`memory`、`evidence`、`revise_memory` 默认 `scope="source-scoped"`，只读改指定应用来源的卡片，外域/未知归属 ID 拒绝且不泄漏当前修订。管理员需跨来源时显式传 `scope="owner-global"`，仍只限该 Agent 与通道；`memory` 可省略 app_id，证据/修订可传 `app_id: null`。未知 scope 拒绝。scope 不是身份凭据，不可用它升级专用召回凭据；stdio 只交给可信宿主。owner 修改保留卡片原应用归属，不因编辑认领旧卡。`remember` 始终从明确授权来源创建卡片。见[范围说明](USAGE.md#查看范围应用来源与管理员)。
+
 ## 本机 stdio
 
 支持启动本地程序的 MCP 客户端，也可以使用：

@@ -151,7 +151,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             revise["expected_current_revision_id"] = changed["current_revision_id"]
             self.assertEqual(await self.call(session, "revise_memory", revise), dict(changed, changed=False))
             await self.error(session, "revise_memory", dict(revise, content="  "), "不能为空")
-            await self.error(session, "revise_memory", dict(revise, card_id=999), "999")
+            await self.error(session, "revise_memory", dict(revise, card_id=999), "card_outside_scope")
             proof = await self.call(session, "evidence", dict(self.domain, card_id=saved["card_id"]))
             self.assertEqual(len(proof), 2)
             self.assertEqual([row["source_kind"] for row in proof], ["manual", "manual"])
@@ -184,6 +184,71 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             proof = await self.call(session, "evidence", dict(self.domain, card_id=saved["card_id"]))
             self.assertEqual([row["resolution"] for row in proof], ["deleted", "manual_revision"])
             self.assertTrue(all(row["current_source_text"] is None for row in proof))
+
+    def scope_fixture(self):
+        self.service.import_history(self.agent, self.app, [self.event])
+        a = self.service.remember(self.agent, self.app, "event-1")
+        self.service.grant_source(self.agent, "other-app")
+        self.service.import_history(self.agent, "other-app", [dict(self.event, app="other-app", text="合成B外域机密")])
+        b = self.service.remember(self.agent, "other-app", "event-1")
+        return a, b
+
+    async def scope_wire(self, session, a, b):
+        tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+        self.assertEqual(set(tools), TOOLS)  # 不增工具
+        for name in ("memory", "evidence", "revise_memory"):
+            schema = tools[name].inputSchema["properties"]["scope"]
+            self.assertEqual(schema["enum"], ["source-scoped", "owner-global"])
+            self.assertEqual(schema["default"], "source-scoped")
+        cards = await self.call(session, "memory", self.domain)
+        self.assertEqual([r["id"] for r in cards], [a["card_id"]])
+        owner = await self.call(session, "memory", dict(agent_id=self.agent, scope="owner-global"))
+        self.assertEqual([r["id"] for r in owner], [a["card_id"], b["card_id"]])
+        self.assertEqual([r["ownership"]["app"] for r in owner], [self.app, "other-app"])
+        await self.error(session, "memory", dict(self.domain, scope="arbitrary"), "scope")
+        await self.error(session, "evidence", dict(self.domain, card_id=b["card_id"]), "card_outside_scope")
+        await self.error(session, "revise_memory", dict(self.domain, card_id=b["card_id"], content="越域",
+                         expected_current_revision_id=-1), "card_outside_scope")
+        changed = await self.call(session, "revise_memory", dict(self.domain, scope="owner-global", card_id=b["card_id"],
+                         content="owner修改不转移归属", expected_current_revision_id=b["current_revision_id"]))
+        proof = await self.call(session, "evidence", dict(agent_id=self.agent, app_id=None, scope="owner-global", card_id=b["card_id"]))
+        self.assertEqual(json.loads(proof[-1]["source_ref"])["app"], "other-app")
+        self.assertEqual(changed["current_revision_id"], proof[-1]["revision_id"])
+
+    async def test_f5_mounted_http_and_mcp_scope_contract(self):
+        a, b = self.scope_fixture()
+        recall_token = self.service.issue_recall_token(self.agent, self.app)["token"]
+        async with serve(self.service) as url, connect(url) as (session, _):
+            await self.scope_wire(session, a, b)
+            async with httpx.AsyncClient(base_url=url, headers={"Authorization": "Bearer " + TOKEN}, timeout=10) as client:
+                reply = await client.get("/api/memory", params=self.domain)
+                self.assertEqual(reply.status_code, 200)
+                self.assertEqual([r["id"] for r in reply.json()["result"]], [a["card_id"]])
+                denied = await client.get("/api/evidence", params=dict(self.domain, card_id=b["card_id"]))
+                self.assertEqual(denied.status_code, 403)
+                self.assertEqual(denied.json(), {"error": "card_outside_scope"})
+                owner = dict(agent_id=self.agent, channel="main", scope="owner-global")
+                self.assertEqual(len((await client.get("/api/memory", params=owner)).json()["result"]), 2)
+                self.assertEqual((await client.get("/api/memory", params=dict(self.domain, scope="invalid"))).status_code, 400)
+                water = await client.get("/api/water", params=self.domain)
+                self.assertEqual(water.status_code, 400)
+                self.assertIn("scope_not_supported", water.json()["error"])
+                self.assertEqual((await client.post("/api/water_node", json=dict(owner, app_id=None, node_id="f5-lake", node_type="lake", title="合成湖"))).status_code, 200)
+                self.assertEqual(len((await client.get("/api/water", params=owner)).json()["result"]), 1)
+                self.assertEqual((await client.post("/api/revise_memory", json={})).status_code, 404)
+                self.assertEqual((await client.get("/api/memory", params=owner, headers={"Authorization": "Bearer " + recall_token})).status_code, 401)
+                self.assertEqual((await client.post("/api/recall", json={"message": "旅行"})).status_code, 401)
+                self.assertEqual((await client.post("/api/recall", json={"message": "旅行", "scope": "owner-global"},
+                    headers={"Authorization": "Bearer " + recall_token})).status_code, 400)
+
+    async def test_f5_official_stdio_scope_contract(self):
+        a, b = self.scope_fixture()
+        params = StdioServerParameters(command=sys.executable,
+            args=["-m", "thalemora.app", "--data", str(self.root), "mcp"],
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")})
+        async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+            await session.initialize()
+            await self.scope_wire(session, a, b)
 
     async def test_http_auth_gate_on_every_method_and_existing_session(self):
         for token in (None, ""):

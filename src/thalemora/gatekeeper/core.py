@@ -78,7 +78,7 @@ def _stable_hash(value):
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
-def freeze_candidate_map_from_card_ids(card_ids, *, memory_db_path, include_read_only=False):
+def freeze_candidate_map_from_card_ids(card_ids, *, memory_db_path, include_read_only=False, connection=None):
     """Freeze canonical Memory projections for an already-derived candidate set.
 
     Decision-only projection. The maintenance caller may include manual cards
@@ -99,8 +99,10 @@ def freeze_candidate_map_from_card_ids(card_ids, *, memory_db_path, include_read
     if not ordered_ids:
         return []
 
-    connection = sqlite3.connect(memory_path)
-    connection.row_factory = sqlite3.Row
+    owns_connection = connection is None
+    if owns_connection:
+        connection = sqlite3.connect(memory_path)
+        connection.row_factory = sqlite3.Row
     try:
         frozen = []
         for card_id in ordered_ids:
@@ -131,7 +133,8 @@ def freeze_candidate_map_from_card_ids(card_ids, *, memory_db_path, include_read
             })
         return frozen
     finally:
-        connection.close()
+        if owns_connection:
+            connection.close()
 
 def gate_input_hash(core, frozen_map, profile):
     ordered = sorted(frozen_map, key=lambda item: int(item["card_id"]))

@@ -74,10 +74,11 @@ class AuthorityFixTests(unittest.TestCase):
                      text="另一个应用的人工私有约定")
         self.app.import_history(self.agent, "other-app", [other])
         self.app.remember(self.agent, "other-app", "other-only")
-        manual = self.cards()[0]
+        self.assertEqual(self.cards(), [])
+        manual = self.app.memory(self.agent, "other-app")[0]
         # 人工编辑可以来自所有者的另一界面，但不应改变这张卡的原始 app 归属。
         self.app.revise_memory(self.agent, "synthetic-app", manual["id"], other["text"],
-                               manual["current_revision_id"])
+                               manual["current_revision_id"], scope="owner-global")
         self.tick()
         inputs = [json.loads(p["messages"][-1]["content"]) for m,p in self.provider.calls if m=="gatekeeper"]
         self.assertEqual([], inputs[0]["frozen_cards"])

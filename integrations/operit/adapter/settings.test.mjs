@@ -4,7 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const sources = Object.fromEntries(await Promise.all(['settings.js', 'settings.ui.js', 'main.js'].map(async n => [n, await readFile(new URL(n, import.meta.url), 'utf8')])));
-function host(store = new Map(), failSave = false) {
+function host(store = new Map(), failSave = false, response = { rendered: '[记忆 1] 我喜欢乌龙茶' }) {
     const modules = {}, registrations = {}, requests = [], warnings = [];
     const prefs = { getString: (key, fallback) => store.get(key) || fallback, edit: () => ({
         putString(key, value) { this.key = key; this.value = value; return this; },
@@ -16,7 +16,7 @@ function host(store = new Map(), failSave = false) {
         vm.runInNewContext(sources[name], {
             exports, require: name => load(name.replace('./', '')),
             Java: { getApplicationContext: () => ({ getSharedPreferences: () => prefs }) },
-            Tools: { Net: { http: async options => { requests.push(options); return { statusCode: 200, content: JSON.stringify({ rendered: '[记忆 1] 我喜欢乌龙茶' }) }; } } },
+            Tools: { Net: { http: async options => { requests.push(options); return { statusCode: 200, content: JSON.stringify(response) }; } } },
             ToolPkg: { registerToolboxUiModule: def => { registrations.ui = def; }, registerPromptFinalizeHook: def => { registrations.hook = def; } },
             console: { log() {}, warn: line => warnings.push(line) }
         });
@@ -43,6 +43,19 @@ test('配置持久化后新宿主读取，开关控制实际召回和当轮注�
     restarted.load('settings.js').save({ ...config, enabled: false });
     assert.equal(await main.onPromptFinalize(input), null);
     assert.equal(restarted.requests.length, 1);
+});
+
+test('Embedding 降级 warning 兼容：词法资料照常注入，空结果跳过，无重试', async () => {
+    for (const rendered of ['[记忆 1] 合成词法资料', '']) {
+        const adapter = host(new Map(), false, { rendered, memories: [], archive: [], empty: !rendered,
+            errors: ['embedding_unavailable', 'rerank_unavailable'] });
+        adapter.load('settings.js').save(config);
+        const result = await adapter.load('main.js').onPromptFinalize(input);
+        if (rendered) assert.match(result.processedInput, /合成词法资料/);
+        else assert.equal(result, null);
+        assert.equal(adapter.requests.length, 1);
+        assert.equal(adapter.warnings.length, 0);
+    }
 });
 
 test('默认关闭；非发送前阶段不读取记忆', async () => {

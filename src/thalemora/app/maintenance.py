@@ -156,26 +156,13 @@ def materialize(routes, sources, agent_id, app_id, channel, job_id):
     return candidates
 
 
-def freeze(memory_path, app_id, channel):
+def freeze(memory_path, agent_id, app_id, channel):
+    from thalemora.memory.scopes import ownership, belongs
     with connect(memory_path) as db:
-        ids = {r[0] for r in db.execute(
-            "SELECT card_id FROM archive_card_scopes WHERE app=? AND channel=?", (app_id, channel))}
-        # 人工卡在 v0.5.0 未登记 archive_card_scopes，按已有人工证据归属读取；
-        # 不猜测无来源卡片的 app，也不将其他 app 的人工正文送入模型。
-        for row in db.execute(
-                "SELECT DISTINCT c.id,e.source_ref FROM cards c "
-                "JOIN card_revisions history ON history.card_id=c.id AND history.revision_no=1 "
-                "JOIN card_evidence e ON e.revision_id=history.id "
-                "WHERE c.source='manual' AND e.source_kind='manual' "
-                "AND NOT EXISTS(SELECT 1 FROM archive_card_scopes s WHERE s.card_id=c.id)"):
-            try:
-                ref = json.loads(row["source_ref"])
-            except (ValueError, TypeError):
-                continue  # 历史手工来源可能是自由文本，不伪造 scope。
-            if isinstance(ref, dict) and ref.get("app") == app_id and ref.get("channel", "main") == channel:
-                ids.add(row["id"])
-    return gate.freeze_candidate_map_from_card_ids(sorted(ids), memory_db_path=memory_path,
-                                                   include_read_only=True)
+        db.execute('BEGIN')
+        ids = [cid for cid, scope in ownership(db, agent_id, channel).items() if belongs(scope, app_id, channel)]
+        return gate.freeze_candidate_map_from_card_ids(sorted(ids), memory_db_path=memory_path,
+                                                       include_read_only=True, connection=db)
 
 
 def applied_receipt(path, candidate_id, result):
@@ -196,20 +183,18 @@ def commit(application, archive, memory_path, sources, app_id, channel, candidat
                                     "AND source_event_id=?", (app_id, channel, source["source_event_id"])).fetchone()
             if row is None or row["version"] != source["version"] or row["deleted"] != source["deleted"]:
                 raise ValueError("stale_archive_source")
-        with connect(memory_path) as db, db:
-            db.execute("PRAGMA foreign_keys=ON")
-            db.execute("BEGIN IMMEDIATE")
+        from thalemora.memory.scopes import SOURCE, ownership, belongs
+        with application._memory_transaction(archive.agent_id, app_id, channel, SOURCE, memory_path) as db:
             target = decision.get("target_card_id")
-            if target is not None:
-                scope = db.execute("SELECT app,channel FROM archive_card_scopes WHERE card_id=?", (target,)).fetchone()
-                if scope is None or tuple(scope) != (app_id, channel):
-                    raise ValueError("target_outside_archive_scope")
+            if target is not None and not belongs(ownership(db, archive.agent_id, channel).get(target), app_id, channel):
+                raise ValueError("target_outside_archive_scope")
             result = gate._commit(decision, payload, frozen, memory_db_path=memory_path,
                                   candidate_id=candidate_id, source="auto", origin="auto_writer",
                                   evidence_source_kind=None, evidence_source_ref=None,
                                   evidence_rows=payload["evidence_rows"], connection=db)
-            db.execute("INSERT OR IGNORE INTO archive_card_scopes VALUES(?,?,?)",
-                       (result["card_id"], app_id, channel))
+            if decision['action'] == 'new':
+                db.execute("INSERT OR IGNORE INTO archive_card_scopes VALUES(?,?,?)",
+                           (result["card_id"], app_id, channel))
         return result
 
 
@@ -220,12 +205,15 @@ def reflect(application, agent_id, app_id, channel, path, provider, limit):
             "SELECT * FROM maintenance_reflections WHERE status!='done' ORDER BY candidate_id LIMIT ?", (limit,))]
     for row in rows:
         try:
+            from thalemora.memory.scopes import SOURCE, require_card
+            memory_path = application.memory_path(agent_id, app_id, channel)
+            with connect(memory_path) as db:
+                db.execute('BEGIN')
+                require_card(db, row['card_id'], agent_id, app_id, channel, SOURCE)
+                revision = db.execute("SELECT content,title FROM card_revisions WHERE id=? AND card_id=?",
+                                      (row["revision_id"], row["card_id"])).fetchone()
             text = row["text"]
             if text is None:
-                memory_path = application.memory_path(agent_id, app_id, channel)
-                with connect(memory_path) as db:
-                    revision = db.execute("SELECT content,title FROM card_revisions WHERE id=? AND card_id=?",
-                                          (row["revision_id"], row["card_id"])).fetchone()
                 if revision is None:
                     raise ValueError("reflection_target_revision_missing")
                 output = call(provider, path, row["candidate_id"], "reflection", {
@@ -237,6 +225,8 @@ def reflect(application, agent_id, app_id, channel, path, provider, limit):
                     raise ValueError("invalid reflection suggestion")
                 with connect(path) as db, db:
                     db.execute("UPDATE maintenance_reflections SET text=? WHERE candidate_id=?", (text, row["candidate_id"]))
+            with connect(memory_path) as db:
+                require_card(db, row['card_id'], agent_id, app_id, channel, SOURCE)
             result = application.reflect(agent_id, app_id, channel, text=text, target_kind="memory",
                                          target_id=str(row["card_id"]), target_version=row["revision_id"],
                                          recorded_at=now(), source_ref=row["candidate_id"])
@@ -268,9 +258,6 @@ def maintenance_tick(application, agent_id, app_id, channel="main", *, limit=4, 
         progress = engine.sync(limit=1000)
         backlog = any(r["archive_rowid"] > progress["last_processed_raw_event_id"] for r in engine.rows())
         memory_path = application.memory_path(agent_id, app_id, channel)
-        with connect(memory_path) as db, db:
-            db.execute("CREATE TABLE IF NOT EXISTS archive_card_scopes("
-                       "card_id INTEGER PRIMARY KEY REFERENCES cards(id),app TEXT NOT NULL,channel TEXT NOT NULL)")
         # Completed receipts remain durable; changed Scene versions get a new job identity.
         for summary in reversed(engine.store.list_scenes(states=["finalized"])):
             scene = engine.store.get_scene(summary["scene_id"])
@@ -330,7 +317,7 @@ def maintenance_tick(application, agent_id, app_id, channel="main", *, limit=4, 
                         result = {"card_id": prior["card_id"], "current_revision_id": prior["current_revision_id"]}
                     else:
                         payload = json.loads(candidate["payload_json"])
-                        frozen = freeze(memory_path, app_id, channel)
+                        frozen = freeze(memory_path, agent_id, app_id, channel)
                         decision, frozen = gate.decide(payload, frozen, provider=lambda messages: call(
                             provider, path, job["job_id"], "gatekeeper", {"messages": messages}))
                         ops.record_gate_result(candidate_id, gate.gate_input_hash(payload, frozen, {

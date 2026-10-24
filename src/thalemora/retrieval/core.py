@@ -1,5 +1,5 @@
 """只读 Memory 的可重建检索派生层；提取自 retrieval_shadow.py。
-显式路径、模型与 embedder；encode_many / encode_one 返回同维度归一化向量。
+显式路径、模型与 embedder；边界验证同维度有限非零向量并实施 L2 归一化。
 调用方在修订、状态或 lineage 变更后显式刷新索引；不加载模型。
 """
 from __future__ import annotations
@@ -7,14 +7,54 @@ import datetime
 import hashlib
 import json
 import os
+import numbers
 import sqlite3
-from contextlib import contextmanager
+import time
+from contextlib import contextmanager, nullcontext
 from typing import Mapping, Sequence
 import numpy as np
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
+VECTOR_CONTRACT = 1  # finite, nonzero, flat real vector, L2 unit float32
 
 class RetrievalShadowError(RuntimeError):
     pass
+
+class VectorContractError(RetrievalShadowError):
+    """Invalid numerical/model contract, NOT an optional service outage."""
+
+
+def unit_vector(value) -> np.ndarray:
+    """Reject malformed shapes/types; scale before norm to avoid overflow/underflow."""
+    try:
+        raw = np.asarray(value, dtype=object)
+        if raw.ndim != 1 or not raw.size or any(
+                isinstance(x, (bool, np.bool_)) or not isinstance(x, numbers.Real) for x in raw):
+            raise VectorContractError('vector must be a nonempty flat real numeric vector')
+        vector = np.asarray(value, dtype=np.float64)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise VectorContractError('invalid numeric vector') from exc
+    if not np.isfinite(vector).all():
+        raise VectorContractError('vector must be finite')
+    scale = np.max(np.abs(vector))
+    if scale == 0:
+        raise VectorContractError('zero vector is not a direction')
+    scaled = vector / scale
+    return np.asarray(scaled / np.linalg.norm(scaled), dtype=np.float32)
+
+
+def cached_vector(row) -> np.ndarray:
+    """A marked cache row must already satisfy the contract; never silently fix it."""
+    dim = row['vector_dim']
+    if type(dim) is not int or dim <= 0:
+        raise VectorContractError('invalid cached vector dimension')
+    try:
+        vector = np.frombuffer(row['vector'], dtype=np.float32)
+    except (ValueError, TypeError) as exc:
+        raise VectorContractError('invalid cached vector bytes') from exc
+    if (vector.size != dim or not np.isfinite(vector).all()
+            or not np.isclose(np.linalg.norm(vector.astype(np.float64)), 1., rtol=1e-6, atol=1e-7)):
+        raise VectorContractError('cached vector violates unit/dimension contract')
+    return vector
 
 def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
@@ -114,174 +154,191 @@ class RetrievalIndex:
 
     def _initialize(self) -> None:
         with self._connect() as conn:
-            conn.execute('PRAGMA journal_mode=WAL')
+            # Two independent initializers can both read the old journal mode
+            # then fail its lock upgrade immediately, despite busy_timeout.
+            # Retry ONLY SQLite BUSY here (<= ~2.1s); never retry model inference.
+            deadline = time.monotonic() + 2.0
+            conn.execute('PRAGMA busy_timeout=100')
+            while True:
+                try:
+                    conn.execute('PRAGMA journal_mode=WAL')
+                    break
+                except sqlite3.OperationalError as exc:
+                    if getattr(exc, 'sqlite_errorcode', None) != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
+            conn.execute('PRAGMA busy_timeout=10000')
             conn.executescript(SCHEMA)
+            # Only the disposable retrieval cache evolves. Old vectors have no
+            # trustworthy binding, so keep lexical rows but rebuild vectors lazily.
+            conn.execute('BEGIN IMMEDIATE')
             row = conn.execute('SELECT schema_version FROM retrieval_shadow_schema WHERE singleton=1').fetchone()
-            if row is None:
-                conn.execute('INSERT INTO retrieval_shadow_schema(singleton,schema_version,authority_note) VALUES(1,?,?)', (SCHEMA_VERSION, '仅可重建派生索引；Memory 与原始证据保持唯一权威'))
-            elif int(row['schema_version']) != SCHEMA_VERSION:
+            if row is not None and int(row['schema_version']) not in (1, 2, SCHEMA_VERSION):
                 raise RetrievalShadowError('retrieval shadow schema mismatch')
+            columns = {r['name'] for r in conn.execute('PRAGMA table_info(chunks)')}
+            for name, definition in (
+                ('generation', 'INTEGER NOT NULL DEFAULT 0'),
+                ('target_model', 'TEXT'),
+                ('vector_generation', 'INTEGER'),
+                ('vector_content_hash', 'TEXT'),
+                ('vector_contract', 'INTEGER NOT NULL DEFAULT 0'),
+            ):
+                if name not in columns:
+                    conn.execute(f'ALTER TABLE chunks ADD COLUMN {name} {definition}')
+            conn.execute('CREATE TABLE IF NOT EXISTS model_dimensions ('
+                         'model TEXT PRIMARY KEY, dimension INTEGER NOT NULL CHECK(dimension>0))')
+            conn.execute('CREATE TABLE IF NOT EXISTS lane_generations ('
+                         'source_kind TEXT PRIMARY KEY, generation INTEGER NOT NULL)')
+            conn.executemany('INSERT OR IGNORE INTO lane_generations VALUES(?,0)',
+                             [('memory_card',), ('raw_event',)])
+            conn.execute('INSERT OR REPLACE INTO retrieval_shadow_schema VALUES(1,?,?)',
+                         (SCHEMA_VERSION, '仅可重建派生索引；Memory 与原始证据保持唯一权威'))
+
+    def _generation(self, source_kind: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute('SELECT generation FROM lane_generations WHERE source_kind=?',
+                               (source_kind,)).fetchone()
+        if row is None:
+            raise RetrievalShadowError('invalid source_kind')
+        return int(row[0])
+
+    @staticmethod
+    def _vector_bound(row, model: str) -> bool:
+        bound = (row['vector'] is not None and row['generation'] > 0
+                 and row['vector_generation'] == row['generation']
+                 and row['vector_content_hash'] == row['content_hash']
+                 and row['embedding_model'] == row['target_model'] == model
+                 and row['vector_contract'] == VECTOR_CONTRACT)
+        if bound:
+            cached_vector(row)  # marked but corrupt is an error, not a dropped row
+        return bound
+
+    @staticmethod
+    def _check_dimension(conn, model: str, dimension: int, *, publish=False):
+        row = conn.execute('SELECT dimension FROM model_dimensions WHERE model=?', (model,)).fetchone()
+        if row is not None and row[0] != dimension:
+            raise VectorContractError('embedding model dimension changed; use a new model identity')
+        if row is None and publish:
+            conn.execute('INSERT INTO model_dimensions VALUES(?,?)', (model, dimension))
 
     @staticmethod
     def _source_bundle_hash(rows: Sequence[Mapping]) -> str:
-        payload = [(row['source_key'], row['content_hash'], row.get('epoch_id', ''), row.get('status', '')) for row in rows]
-        return _sha(_stable_json(payload))
+        return _sha(_stable_json(list(rows)))
 
     def _replace_lane(
-        self,
-        source_kind: str,
-        rows: Sequence[Mapping],
-        *,
-        source_path: str,
-        embedder=None,
-        batch_size: int = 16,
+        self, source_kind: str, rows, *, source_path: str, embedder=None,
+        batch_size: int = 16, expected_generation: int | None = None,
+        selector: tuple[str, tuple] | None = None, single: bool = False,
     ) -> dict:
-        if source_kind not in {"memory_card", "raw_event"}:
-            raise RetrievalShadowError("invalid source_kind")
-        rows = list(rows)
-        preserved_vectors = {}
-        with self._connect() as conn:
-            existing_rows = conn.execute(
-                "SELECT source_key,content_hash,vector,vector_dim,embedding_model,embedded_at "
-                "FROM chunks WHERE source_kind=?",
-                (source_kind,),
-            ).fetchall()
-            existing = [row["source_key"] for row in existing_rows]
-            preserved_vectors = {
-                row["source_key"]: {
-                    "content_hash": row["content_hash"],
-                    "vector": row["vector"],
-                    "vector_dim": row["vector_dim"],
-                    "embedding_model": row["embedding_model"],
-                    "embedded_at": row["embedded_at"],
-                }
-                for row in existing_rows
-                if row["vector"] is not None
-            }
-            if existing:
-                conn.executemany(
-                    "DELETE FROM chunks_fts WHERE source_key=?",
-                    [(key,) for key in existing],
-                )
-            conn.execute("DELETE FROM chunks WHERE source_kind=?", (source_kind,))
+        """Publish metadata then CAS vector bindings, never infer under a write lock.
 
+        Suppliers are evaluated AFTER the generation fence is read. A caller with
+        an already materialized snapshot must capture/pass expected_generation
+        before reading its sources. selector is an internal subset of this lane.
+        Any concurrent lane/subset publication supersedes an in-flight batch;
+        missing vectors are detectable and repaired by the next freshness pass.
+        """
+        if source_kind not in {'memory_card', 'raw_event'}:
+            raise RetrievalShadowError('invalid source_kind')
+        model = self.embedding_model  # snapshot identity before source/model work
+        expected = self._generation(source_kind) if expected_generation is None else expected_generation
+        rows = list(rows() if callable(rows) else rows)
+        bundle_hash = self._source_bundle_hash(rows)
+        generation = expected + 1
+        build_id = f'{source_kind}:{generation}:{bundle_hash[:20]}'
+        result = dict(build_id=build_id, source_kind=source_kind, source_count=len(rows),
+                      embedded_count=0, reused_count=0, embedding_model=None,
+                      source_max_id=max((int(r['source_id']) for r in rows), default=None),
+                      content_bundle_hash=bundle_hash, generation=generation, discarded=False)
+        where, params = selector or ('1=1', ())
+        predicate = 'source_kind=? AND (' + where + ')'
+        pending = []
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            updated = conn.execute('UPDATE lane_generations SET generation=generation+1 '
+                                   'WHERE source_kind=? AND generation=?', (source_kind, expected))
+            if updated.rowcount != 1:
+                return dict(result, discarded=True)
+            previous = {r['source_key']: r for r in conn.execute(
+                'SELECT * FROM chunks WHERE ' + predicate, (source_kind, *params))}
+            for key in previous:
+                conn.execute('DELETE FROM chunks_fts WHERE source_key=?', (key,))
+            conn.execute('DELETE FROM chunks WHERE ' + predicate, (source_kind, *params))
             now = _now()
             for row in rows:
+                old = previous.get(row['source_key'])
+                reuse = (old is not None and old['content_hash'] == row['content_hash']
+                         and self._vector_bound(old, model))
+                if reuse:
+                    self._check_dimension(conn, model, old['vector_dim'])
                 conn.execute(
-                    "INSERT INTO chunks("
-                    "source_kind,source_key,source_id,raw_event_start_id,raw_event_end_id,"
-                    "epoch_id,role,event_time,status,importance,title,text,content_hash,"
-                    "provenance_json,created_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        source_kind,
-                        row["source_key"],
-                        int(row["source_id"]),
-                        row.get("raw_event_start_id"),
-                        row.get("raw_event_end_id"),
-                        row.get("epoch_id", ""),
-                        row.get("role", ""),
-                        row.get("event_time", ""),
-                        row.get("status", ""),
-                        row.get("importance"),
-                        row.get("title", ""),
-                        row["text"],
-                        row["content_hash"],
-                        _stable_json(row.get("provenance", {})),
-                        now,
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO chunks_fts(source_key,text) VALUES(?,?)",
-                    (row["source_key"], row["text"]),
-                )
-                previous = preserved_vectors.get(row["source_key"])
-                if (
-                    previous
-                    and previous.get("content_hash") == row["content_hash"]
-                    and previous.get("vector") is not None
-                    and previous.get("embedding_model") == self.embedding_model
-                ):
-                    conn.execute(
-                        "UPDATE chunks SET vector=?,vector_dim=?,embedding_model=?,embedded_at=? "
-                        "WHERE source_key=?",
-                        (
-                            previous.get("vector"),
-                            previous.get("vector_dim"),
-                            previous.get("embedding_model"),
-                            previous.get("embedded_at"),
-                            row["source_key"],
-                        ),
-                    )
+                    'INSERT INTO chunks(source_kind,source_key,source_id,raw_event_start_id,'
+                    'raw_event_end_id,epoch_id,role,event_time,status,importance,title,text,'
+                    'content_hash,provenance_json,created_at,generation,target_model,'
+                    'vector,vector_dim,embedding_model,embedded_at,vector_generation,vector_content_hash,vector_contract) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (source_kind, row['source_key'], int(row['source_id']),
+                     row.get('raw_event_start_id'), row.get('raw_event_end_id'), row.get('epoch_id', ''),
+                     row.get('role', ''), row.get('event_time', ''), row.get('status', ''),
+                     row.get('importance'), row.get('title', ''), row['text'], row['content_hash'],
+                     _stable_json(row.get('provenance', {})), now, generation, model,
+                     old['vector'] if reuse else None, old['vector_dim'] if reuse else None,
+                     model if reuse else None, old['embedded_at'] if reuse else None,
+                     generation if reuse else None, row['content_hash'] if reuse else None,
+                     VECTOR_CONTRACT if reuse else 0))
+                conn.execute('INSERT INTO chunks_fts(source_key,text) VALUES(?,?)',
+                             (row['source_key'], row['text']))
+                if reuse:
+                    result['reused_count'] += 1
+                else:
+                    pending.append(row)
 
-        embedded = 0
-        model_name = None
-        rows_to_embed = [
-            row for row in rows
-            if not (
-                (preserved_vectors.get(row["source_key"]) or {}).get("content_hash")
-                == row["content_hash"]
-                and (preserved_vectors.get(row["source_key"]) or {}).get("vector") is not None
-                and (preserved_vectors.get(row["source_key"]) or {}).get("embedding_model") == self.embedding_model
-            )
-        ]
-        if embedder is not None and rows_to_embed:
-            texts = [row["text"] for row in rows_to_embed]
-            vectors = embedder.encode_many(texts, batch_size=batch_size)
-            if len(vectors) != len(rows_to_embed):
-                raise RetrievalShadowError("embedder returned wrong vector count")
-            model_name = self.embedding_model
-            embedded_at = _now()
-            with self._connect() as conn:
-                for row, vector in zip(rows_to_embed, vectors):
-                    arr = np.asarray(vector, dtype=np.float32).reshape(-1)
-                    conn.execute(
-                        "UPDATE chunks SET vector=?,vector_dim=?,embedding_model=?,embedded_at=? "
-                        "WHERE source_key=?",
-                        (
-                            arr.tobytes(),
-                            int(arr.shape[0]),
-                            model_name,
-                            embedded_at,
-                            row["source_key"],
-                        ),
-                    )
-                    embedded += 1
-
-        max_id = max((int(row["source_id"]) for row in rows), default=None)
-        bundle_hash = self._source_bundle_hash(rows)
-        build_id = f"{source_kind}:{bundle_hash[:20]}"
+        vectors = []
+        if embedder is not None and pending:
+            vectors = ([embedder.encode_one(r['text']) for r in pending] if single else
+                       embedder.encode_many([r['text'] for r in pending], batch_size=batch_size))
+            if not isinstance(vectors, (list, tuple, np.ndarray)):
+                raise VectorContractError('embedder must return a batch of vectors')
+            if isinstance(vectors, np.ndarray) and vectors.ndim == 0:
+                raise VectorContractError('embedder must return a batch of vectors')
+            if len(vectors) != len(pending):
+                raise RetrievalShadowError('embedder returned wrong vector count')
+            # Numerical validation and normalization also run outside the write transaction.
+            vectors = [unit_vector(v) for v in vectors]
+            if len({v.size for v in vectors}) != 1:
+                raise VectorContractError('embedder returned inconsistent batch dimensions')
         with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            current = conn.execute('SELECT generation FROM lane_generations WHERE source_kind=?',
+                                   (source_kind,)).fetchone()[0]
+            if current != generation:
+                return dict(result, discarded=True)
+            if vectors:
+                self._check_dimension(conn, model, int(vectors[0].size), publish=True)
+            for row, vector in zip(pending, vectors):
+                changed = conn.execute(
+                    'UPDATE chunks SET vector=?,vector_dim=?,embedding_model=?,embedded_at=?,'
+                    'vector_generation=?,vector_content_hash=?,vector_contract=? WHERE source_kind=? AND source_key=? '
+                    'AND generation=? AND content_hash=? AND target_model=?',
+                    (vector.tobytes(), int(vector.size), model, _now(), generation, row['content_hash'], VECTOR_CONTRACT,
+                     source_kind, row['source_key'], generation, row['content_hash'], model))
+                if changed.rowcount != 1:
+                    # Never claim successful work when its destination vanished.
+                    raise RetrievalShadowError('vector destination CAS lost')
+                result['embedded_count'] += changed.rowcount
+            result['embedding_model'] = model if vectors else None
             conn.execute(
-                "INSERT OR REPLACE INTO build_receipts("
-                "build_id,source_kind,source_path,source_count,embedded_count,"
-                "embedding_model,source_max_id,content_bundle_hash,created_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?)",
-                (
-                    build_id,
-                    source_kind,
-                    os.path.abspath(source_path),
-                    len(rows),
-                    embedded,
-                    model_name,
-                    max_id,
-                    bundle_hash,
-                    _now(),
-                ),
-            )
-        return {
-            "build_id": build_id,
-            "source_kind": source_kind,
-            "source_count": len(rows),
-            "embedded_count": embedded,
-            "embedding_model": model_name,
-            "source_max_id": max_id,
-            "content_bundle_hash": bundle_hash,
-        }
+                'INSERT INTO build_receipts(build_id,source_kind,source_path,source_count,'
+                'embedded_count,embedding_model,source_max_id,content_bundle_hash,created_at) '
+                'VALUES(?,?,?,?,?,?,?,?,?)',
+                (build_id, source_kind, os.path.abspath(source_path), len(rows),
+                 result['embedded_count'], result['embedding_model'], result['source_max_id'],
+                 bundle_hash, _now()))
+        return result
 
     @staticmethod
-    def _memory_rows(memory_db: str) -> list[dict]:
-        with _ro(memory_db) as conn:
+    def _memory_rows(memory_db: str, *, connection=None) -> list[dict]:
+        with (nullcontext(connection) if connection is not None else _ro(memory_db)) as conn:
             card_columns = {
                 str(row["name"])
                 for row in conn.execute("PRAGMA table_info(cards)").fetchall()
@@ -336,6 +393,8 @@ class RetrievalIndex:
                 ).fetchall()
                 if has_organized else []
             )
+            from thalemora.memory.extensions import load_extensions
+            extensions = load_extensions(conn)
         organized_by_card = {int(item["card_id"]): item for item in organized_rows}
         evidence_by_revision = {}
         for evidence in evidence_rows:
@@ -384,104 +443,45 @@ class RetrievalIndex:
                     },
                 }
             )
+        # Independent units reuse the existing memory_card lane and schema.
+        # source_id remains the parent card ID; source_key is the unit identity.
+        for item in extensions:
+            if item['eligibility'] != 'current' or not item['content'].strip():
+                continue
+            text = item['content'].strip()
+            out.append({
+                'source_key': f"memory:{item['card_id']}:extension:{item['extension_id']}",
+                'source_id': item['card_id'], 'status': item['card_status'],
+                'importance': item['importance'], 'title': '',
+                'event_time': item['happened_at'] or '', 'text': text,
+                'content_hash': _sha(text),
+                'provenance': {
+                    'card_id': item['card_id'], 'revision_id': item['base_revision_id'],
+                    'extension_id': item['extension_id'], 'base_revision_id': item['base_revision_id'],
+                    'text_projection': 'extension', 'keywords': item['keywords'] or '',
+                    'evidence_refs': item['evidence_refs'],
+                },
+            })
         return out
 
-    def refresh_memory_card(
-        self,
-        card_id: int,
-        *,
-        embedder=None,
-    ) -> dict:
-        """Refresh exactly one derived Memory chunk after a canonical revision."""
-        memory_db = self.memory_db_path
+    def refresh_memory_card(self, card_id: int, *, embedder=None) -> dict:
+        """Atomically replace this card's canonical and extension units."""
         embedder = self.embedder if embedder is None else embedder
         cid = int(card_id)
-        rows = [row for row in self._memory_rows(memory_db) if int(row["source_id"]) == cid]
-        source_key = f"memory:{cid}"
-        if not rows:
-            with self._connect() as conn:
-                conn.execute("DELETE FROM chunks_fts WHERE source_key=?", (source_key,))
-                conn.execute("DELETE FROM chunks WHERE source_key=?", (source_key,))
-            return {"card_id": cid, "present": False, "embedded": False}
+        result = self._replace_lane(
+            'memory_card',
+            lambda: [r for r in self._memory_rows(self.memory_db_path) if int(r['source_id']) == cid],
+            source_path=self.memory_db_path, embedder=embedder,
+            selector=('source_id=?', (cid,)), single=True)
+        ready = not result['discarded'] and bool(result['embedded_count'] + result['reused_count'])
+        return dict(card_id=cid, present=bool(result['source_count']), embedded=ready,
+                    embedding_model=self.embedding_model if ready else None,
+                    discarded=result['discarded'])
 
-        row = rows[0]
-        vector = None
-        model_name = None
-        embedded_at = None
-        with self._connect() as conn:
-            existing = conn.execute(
-                "SELECT content_hash,vector,vector_dim,embedding_model,embedded_at "
-                "FROM chunks WHERE source_key=?", (source_key,)
-            ).fetchone()
-        if (
-            existing is not None
-            and existing["content_hash"] == row["content_hash"]
-            and existing["vector"] is not None
-            and existing["embedding_model"] == self.embedding_model
-        ):
-            vector = np.frombuffer(existing["vector"], dtype=np.float32).copy()
-            model_name = existing["embedding_model"]
-            embedded_at = existing["embedded_at"]
-        elif embedder is not None:
-            vector = np.asarray(embedder.encode_one(row["text"]), dtype=np.float32).reshape(-1)
-            model_name = self.embedding_model
-            embedded_at = _now()
-        with self._connect() as conn:
-            conn.execute("DELETE FROM chunks_fts WHERE source_key=?", (source_key,))
-            conn.execute("DELETE FROM chunks WHERE source_key=?", (source_key,))
-            conn.execute(
-                "INSERT INTO chunks("
-                "source_kind,source_key,source_id,raw_event_start_id,raw_event_end_id,"
-                "epoch_id,role,event_time,status,importance,title,text,content_hash,"
-                "provenance_json,vector,vector_dim,embedding_model,embedded_at,created_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    "memory_card",
-                    row["source_key"],
-                    int(row["source_id"]),
-                    row.get("raw_event_start_id"),
-                    row.get("raw_event_end_id"),
-                    row.get("epoch_id", ""),
-                    row.get("role", ""),
-                    row.get("event_time", ""),
-                    row.get("status", ""),
-                    row.get("importance"),
-                    row.get("title", ""),
-                    row["text"],
-                    row["content_hash"],
-                    _stable_json(row.get("provenance", {})),
-                    None if vector is None else vector.tobytes(),
-                    None if vector is None else int(vector.shape[0]),
-                    model_name,
-                    embedded_at,
-                    _now(),
-                ),
-            )
-            conn.execute(
-                "INSERT INTO chunks_fts(source_key,text) VALUES(?,?)",
-                (source_key, row["text"]),
-            )
-        return {
-            "card_id": cid,
-            "present": True,
-            "embedded": vector is not None,
-            "embedding_model": model_name,
-        }
-
-    def rebuild_memory(
-        self,
-        *,
-        batch_size: int = 16,
-    ) -> dict:
-        memory_db, embedder = self.memory_db_path, self.embedder
-        rows = self._memory_rows(memory_db)
+    def rebuild_memory(self, *, batch_size: int = 16) -> dict:
         return self._replace_lane(
-            "memory_card",
-            rows,
-            source_path=memory_db,
-            embedder=embedder,
-            batch_size=batch_size,
-        )
+            'memory_card', lambda: self._memory_rows(self.memory_db_path),
+            source_path=self.memory_db_path, embedder=self.embedder, batch_size=batch_size)
 
     def _lexical_hits(self, query: str, source_kind: str, limit: int, *, literal=False) -> list[tuple[str, float]]:
         query = str(query or "").strip()
@@ -514,32 +514,30 @@ class RetrievalIndex:
         source_kind: str,
         limit: int,
     ) -> list[tuple[str, float]]:
-        q = np.asarray(query_vector, dtype=np.float32).reshape(-1)
-        norm = np.linalg.norm(q)
-        if norm <= 0:
-            return []
-        q = q / norm
+        q = unit_vector(query_vector)
         with self._connect() as conn:
+            self._check_dimension(conn, self.embedding_model, int(q.size))
             rows = conn.execute(
-                "SELECT source_key,vector,vector_dim,embedding_model FROM chunks "
+                "SELECT * FROM chunks "
                 "WHERE source_kind=? AND vector IS NOT NULL",
                 (source_kind,),
             ).fetchall()
         keys = []
         vectors = []
         for row in rows:
+            if not self._vector_bound(row, row['embedding_model']):
+                continue  # v1/unbound/unfinished cache vectors are never trusted
             if row["embedding_model"] != self.embedding_model:
                 raise RetrievalShadowError("索引模型已变化，请先更新或重建")
-            dim = int(row["vector_dim"] or 0)
-            vec = np.frombuffer(row["vector"], dtype=np.float32)
-            if dim <= 0 or vec.size != dim or vec.size != q.size:
-                raise RetrievalShadowError("索引向量维度损坏或与查询模型不匹配")
+            vec = cached_vector(row)
+            if vec.size != q.size:
+                raise VectorContractError("索引向量维度损坏或与查询模型不匹配")
             keys.append(row["source_key"])
             vectors.append(vec)
         if not vectors:
             return []
         matrix = np.vstack(vectors)
-        scores = matrix @ q
+        scores = np.clip(matrix @ q, -1., 1.)
         n = min(int(limit), len(keys))
         if n <= 0:
             return []
@@ -568,7 +566,7 @@ class RetrievalIndex:
             reasons.setdefault(key, []).append(f'lexical_rank:{rank}')
         for (rank, (key, cosine)) in enumerate(vector, 1):
             scores[key] = scores.get(key, 0.0) + 1.0 / (60.0 + rank)
-            reasons.setdefault(key, []).append(f'vector_rank:{rank}:{cosine:.4f}')
+            reasons.setdefault(key, []).append(f'vector_rank:{rank}:{cosine!r}')
         if not scores:
             return []
         keys = list(scores)

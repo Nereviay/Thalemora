@@ -130,14 +130,14 @@ def create_http(service, token):
             message = args.pop("message")
             result = await anyio.to_thread.run_sync(
                 partial(service.recall_for_turn, **scope, query=message, **args), abandon_on_cancel=True)
-            if result["errors"] and not result.get("rendered"):
+            # Only recognized optional modules can be successful degraded recalls.
+            errors = result["errors"]
+            if any(not isinstance(e, dict) or e.get("module") not in ("embedding", "rerank") for e in errors):
                 return failure(503, "recall_unavailable")
-            # 可选 Rerank 出错仍可使用基础召回，不能让它拖垮整轮消息。
-            warnings = ["rerank_unavailable"] if result["errors"] else []
+            warnings = list(dict.fromkeys(e["module"] + "_unavailable" for e in errors))
             # 仅输出插入文本及引用标识，不透传内部 score、正文或异常。
-            refs = {kind: [{k: item[k] for k in fields if k in item} for item in result[kind]]
-                    for kind, fields in (("memories", ("id", "revision_id")),
-                                         ("archive", ("id", "version")))}
+            from thalemora.retrieval.recall import public_references
+            refs = public_references(result)
             return JSONResponse(dict(rendered=result["rendered"], **refs,
                                      empty=not bool(result["rendered"]), errors=warnings))
 

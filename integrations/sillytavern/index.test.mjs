@@ -57,6 +57,20 @@ function host(fetch, immediateTimeout = false) {
 const user = mes => ({ is_user: true, mes });
 const ok = rendered => ({ ok: true, json: async () => ({ rendered }) });
 
+test('Embedding 降级 warning 兼容：继续插入词法资料，空结果清槽，不重试', async () => {
+    for (const rendered of ['[记忆 1] 合成词法资料', '']) {
+        const adapter = host(async () => ({ ok: true, json: async () => ({
+            rendered, memories: [], archive: [], empty: !rendered,
+            errors: ['embedding_unavailable', 'rerank_unavailable'],
+        }) }));
+        const outgoing = await adapter.generate([user('茶')]);
+        assert.equal(adapter.calls.length, 1);
+        assert.equal(adapter.prompts['thalemora-recall'].value, rendered);
+        assert.equal(outgoing.length, rendered ? 2 : 1);
+        assert.equal(adapter.warnings.length, 0);
+    }
+});
+
 test('相关召回：最新用户消息、专用 token、异步结果进入模拟模型 Context', async () => {
     const adapter = host(async () => { await Promise.resolve(); return ok('[记忆 1] 喜欢乌龙茶'); });
     const outgoing = await adapter.generate([user('旧问题'), user('喜欢什么茶？'), { mes: '助手旧回答' }]);

@@ -1,5 +1,6 @@
 """官方 MCP 薄桥；stdio 与受认证的 Streamable HTTP 共用 Application。"""
 from mcp.server.fastmcp import FastMCP
+from typing import Literal
 
 
 def create_mcp(service):
@@ -22,14 +23,16 @@ def create_mcp(service):
         return service.inner_state(agent_id, app_id, kind, channel, limit=limit, offset=offset)
 
     @server.tool()
-    def memory(agent_id: str, app_id: str, channel: str = "main", limit: int = 20, offset: int = 0) -> list:
-        """分页读取已授权域的记忆及当前修订 ID。"""
-        return service.memory(agent_id, app_id, channel, limit=limit, offset=offset)
+    def memory(agent_id: str, app_id: str | None = None, channel: str = "main", limit: int = 20,
+               offset: int = 0, scope: Literal["source-scoped", "owner-global"] = "source-scoped") -> list:
+        """默认按授权来源分页；owner-global 显式管理该 Agent 当前通道全部来源，scope 不是身份凭据。"""
+        return service.memory(agent_id, app_id, channel, limit=limit, offset=offset, scope=scope)
 
     @server.tool()
-    def evidence(agent_id: str, app_id: str, card_id: int, channel: str = "main", limit: int = 20, offset: int = 0) -> list:
-        """读取记忆证据和当前来源状态；人工来源不冒充 verified。"""
-        return service.evidence(agent_id, app_id, card_id, channel, limit=limit, offset=offset)
+    def evidence(agent_id: str, app_id: str | None, card_id: int, channel: str = "main", limit: int = 20,
+                 offset: int = 0, scope: Literal["source-scoped", "owner-global"] = "source-scoped") -> list:
+        """先核卡归属，再按范围投影证据后分页；owner-global 可查看完整历史，不冒充 verified。"""
+        return service.evidence(agent_id, app_id, card_id, channel, limit=limit, offset=offset, scope=scope)
 
     @server.tool()
     def import_history(agent_id: str, app_id: str, channel: str, events: list[dict]) -> list:
@@ -47,10 +50,11 @@ def create_mcp(service):
         return service.remember(agent_id, app_id, source_event_id, channel)
 
     @server.tool()
-    def revise_memory(agent_id: str, app_id: str, card_id: int, content: str,
-                      expected_current_revision_id: int, channel: str = "main") -> dict:
-        """明确的人工正文修订；须提供当前修订 ID，冲突失败，不充当 Agent 作者。"""
+    def revise_memory(agent_id: str, app_id: str | None, card_id: int, content: str,
+                      expected_current_revision_id: int, channel: str = "main",
+                      scope: Literal["source-scoped", "owner-global"] = "source-scoped") -> dict:
+        """同事务核范围及 CAS 的人工修订；owner-global 不改变卡归属，不充当 Agent 作者。"""
         return service.revise_memory(agent_id, app_id, card_id, content,
-                                     expected_current_revision_id, channel)
+                                     expected_current_revision_id, channel, scope=scope)
 
     return server

@@ -1,6 +1,6 @@
 """持久单用户应用接线；不运行 Agent、不将档案冒充 canonical 行动。"""
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import asdict, is_dataclass
 import json
 import sqlite3
@@ -12,7 +12,9 @@ from thalemora.inner_world.store import InnerStore
 from thalemora.persona import Persona
 from thalemora.self_model.host import HostedSelfModel
 from thalemora.memory import schema as memory_schema
-from thalemora.memory.revision_store import create_card, update_card
+from thalemora.memory.revision_store import create_card_in_transaction, update_card_in_transaction
+from thalemora.memory.source_validity import resolve_archive_evidence
+from thalemora.memory.scopes import SOURCE, OWNER, validate_scope, ownership, belongs, require_card, reference_scope
 from thalemora.water import schema as water_schema
 from thalemora.water.store import create_node
 
@@ -137,9 +139,35 @@ class Application:
                 INSERT INTO history_fts(history_fts) VALUES('rebuild');
             """)
 
-    def memory_path(self, agent_id, app_id, channel):
-        session = self.session(agent_id, app_id, channel)
-        path = self.registry.archive_db_path(self.owner, session.agent_id).with_name(f"memory_{channel}.sqlite")
+    def _management_authorize(self, db, agent_id, app_id, channel, scope):
+        validate_scope(scope)
+        if channel not in ("main", "private"):
+            raise ValueError("channel 须为 main 或 private")
+        path = self.registry._agent_path(db, self.owner, agent_id)
+        if scope == SOURCE:
+            self.registry._source(app_id, channel)
+            if not db.execute("SELECT 1 FROM sources WHERE agent_id=? AND app_id=? AND channel=?",
+                              (agent_id, app_id, channel)).fetchone():
+                raise PermissionError("来源未获该 Agent 的指定域授权")
+        return path
+
+    @contextmanager
+    def _memory_transaction(self, agent_id, app_id, channel, scope, path):
+        # 真锁序：Archive（需要时）→ registry → Memory；只写 Memory，不需多库写原子性。
+        with closing(sqlite3.connect(self.registry.registry_path)) as registry, registry:
+            registry.execute("BEGIN IMMEDIATE")
+            archive_path = self._management_authorize(registry, agent_id, app_id, channel, scope)
+            if archive_path.with_name(f"memory_{channel}.sqlite") != path:
+                raise PermissionError("Agent 存储路径已变化")
+            with closing(sqlite3.connect(path)) as db, db:
+                db.row_factory = sqlite3.Row
+                db.execute("PRAGMA foreign_keys=ON")
+                db.execute("BEGIN IMMEDIATE")
+                yield db
+
+    def memory_path(self, agent_id, app_id=None, channel="main", *, scope=SOURCE):
+        with closing(sqlite3.connect(self.registry.registry_path)) as registry:
+            path = self._management_authorize(registry, agent_id, app_id, channel, scope).with_name(f"memory_{channel}.sqlite")
         with closing(sqlite3.connect(path)) as db, db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys=ON")
@@ -148,109 +176,152 @@ class Application:
                 water_schema.initialize(db)
         return path
 
-    def memory(self, agent_id, app_id, channel="main", *, limit=20, offset=0):
+    def memory(self, agent_id, app_id=None, channel="main", *, limit=20, offset=0, scope=SOURCE):
         self.page(limit, offset)
-        with closing(sqlite3.connect(self.memory_path(agent_id, app_id, channel))) as db:
+        path = self.memory_path(agent_id, app_id, channel, scope=scope)
+        with closing(sqlite3.connect(path)) as db:
             db.row_factory = sqlite3.Row
-            return [dict(r) for r in db.execute(
-                "SELECT id,title,content,happened_at,current_revision_id,memory_kind FROM cards ORDER BY id LIMIT ? OFFSET ?",
-                (limit, offset))]
+            db.execute("BEGIN")
+            scopes = ownership(db, agent_id, channel)
+            db.create_function("in_source_scope", 1, lambda cid: belongs(scopes.get(cid), app_id, channel))
+            cards = [dict(r) for r in db.execute(
+                "SELECT id,title,content,happened_at,current_revision_id,memory_kind FROM cards "
+                "WHERE ? OR in_source_scope(id) ORDER BY id LIMIT ? OFFSET ?", (scope == OWNER, limit, offset))]
+        from thalemora.memory.extensions import scoped_extensions
+        archive_path = self.registry.archive_db_path(self.owner, agent_id)
+        extensions = scoped_extensions(path, archive_path, agent_id, app_id, channel, scope=scope)
+        for card in cards:
+            if scope == OWNER:
+                card['ownership'] = scopes[card['id']]
+            card['extensions'] = [e for e in extensions if e['card_id'] == card['id']]
+        return cards
 
     def remember(self, agent_id, app_id, source_event_id, channel="main"):
         """显式把档案原文存为人工记忆；证据保留完整来源 envelope，绝不宣称 verified。"""
         archive = self.archive(agent_id, app_id, channel)
-        with closing(sqlite3.connect(archive.path)) as db:
+        path = self.memory_path(agent_id, app_id, channel)
+        # 与后台同序：Archive → registry → Memory；来源读取至卡/修订/证据/归属提交均持锁，无模型。
+        with closing(sqlite3.connect(archive.path)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            archive._authorize(app_id, channel)
             row = db.execute("SELECT text,occurred_at,version FROM history_events WHERE app=? AND channel=? "
                              "AND source_event_id=? AND deleted=0", (app_id, channel, source_event_id)).fetchone()
-        if row is None or not row[0]:
-            raise KeyError("找不到有效历史正文")
-        ref = json.dumps(dict(agent_id=agent_id, app=app_id, channel=channel,
-                              source_event_id=source_event_id, version=row[2]), ensure_ascii=False)
-        return create_card(self.memory_path(agent_id, app_id, channel), content=row[0], happened_at=row[1],
-                           origin="manual_ui", source="manual", evidence_source_kind="manual",
-                           evidence_source_ref=ref)
+            if row is None or not row[0]:
+                raise KeyError("找不到有效历史正文")
+            ref = json.dumps(dict(agent_id=agent_id, app=app_id, channel=channel,
+                                  source_event_id=source_event_id, version=row[2]), ensure_ascii=False)
+            with self._memory_transaction(agent_id, app_id, channel, SOURCE, path) as memory:
+                result = create_card_in_transaction(memory, content=row[0], happened_at=row[1],
+                    origin="manual_ui", source="manual", evidence_source_kind="manual", evidence_source_ref=ref)
+                memory.execute("INSERT INTO archive_card_scopes VALUES(?,?,?)", (result['card_id'], app_id, channel))
+                return result
 
-    def revise_memory(self, agent_id, app_id, card_id, content, expected_current_revision_id, channel="main"):
-        """人工正文修订，沿用正式 CAS；来源证据和其他字段语义保持原样。"""
+    def revise_memory(self, agent_id, app_id, card_id, content, expected_current_revision_id, channel="main", *, scope=SOURCE):
+        """同一写事务核归属/CAS；owner 编辑不转移归属，也不认领未知旧卡。"""
         if not isinstance(content, str) or not content.strip():
             raise ValueError("人工修订正文不能为空")
         if type(card_id) is not int or type(expected_current_revision_id) is not int:
             raise ValueError("card_id 和 expected_current_revision_id 须为整数")
-        return update_card(self.memory_path(agent_id, app_id, channel), card_id=card_id,
-                           content=content, expected_current_revision_id=expected_current_revision_id,
-                           origin="manual_ui", change_type="manual_edit",
-                           evidence_source_kind="manual",
-                           evidence_source_ref=json.dumps({"kind": "mcp_explicit_manual_revision",
-                                                           "app": app_id, "channel": channel}))
+        path = self.memory_path(agent_id, app_id, channel, scope=scope)
+        with self._memory_transaction(agent_id, app_id, channel, scope, path) as db:
+            card_scope = require_card(db, card_id, agent_id, app_id, channel, scope)
+            ref = {"kind": "mcp_explicit_manual_revision"}
+            if card_scope['state'] == 'known':
+                ref.update(agent_id=agent_id, app=card_scope['app'], channel=channel)
+            return update_card_in_transaction(db, card_id=card_id,
+                content=content, expected_current_revision_id=expected_current_revision_id,
+                origin="manual_ui", change_type="manual_edit", evidence_source_kind="manual",
+                evidence_source_ref=json.dumps(ref))
 
-    def evidence(self, agent_id, app_id, card_id, channel="main", *, limit=20, offset=0):
+    def evidence(self, agent_id, app_id, card_id, channel="main", *, limit=20, offset=0, scope=SOURCE):
         self.page(limit, offset)
-        with closing(sqlite3.connect(self.memory_path(agent_id, app_id, channel))) as db:
+        path = self.memory_path(agent_id, app_id, channel, scope=scope)
+        with closing(sqlite3.connect(path)) as db:
             db.row_factory = sqlite3.Row
-            evidence = [dict(r) for r in db.execute("SELECT e.* FROM card_evidence e JOIN card_revisions r "
-                    "ON r.id=e.revision_id WHERE r.card_id=? ORDER BY e.id LIMIT ? OFFSET ?",
-                    (card_id, limit, offset))]
-        archive = self.archive(agent_id, app_id, channel)
-        with closing(sqlite3.connect(archive.path)) as db:
+            db.execute("BEGIN")
+            require_card(db, card_id, agent_id, app_id, channel, scope)
+            evidence = [dict(r, evidence_kind='revision', extension_id=None, base_revision_id=None)
+                        for r in db.execute("SELECT e.* FROM card_evidence e JOIN card_revisions r "
+                    "ON r.id=e.revision_id WHERE r.card_id=? ORDER BY e.id", (card_id,))]
+        # 先投影再分页；不返回外域/不明 envelope，连 source_ref 也不泄漏。
+        evidence = [e for e in evidence if scope == OWNER or reference_scope(e, agent_id) == (app_id, channel)]
+        archive_path = self.registry.archive_db_path(self.owner, agent_id)
+        with closing(sqlite3.connect(archive_path)) as db:
             for item in evidence:
-                if item["source_kind"] in {"manual", "derived"}:
-                    if item["source_kind"] == "derived":
-                        try:
-                            ref = json.loads(item["source_ref"])
-                        except (ValueError, TypeError):
-                            continue
-                        if not isinstance(ref, dict) or ref.get("kind") != "archive_quote":
-                            continue
-                    else:
-                        ref = json.loads(item["source_ref"])
-                    if ref.get("kind") == "mcp_explicit_manual_revision":
-                        item["resolution"] = "manual_revision"
-                        item["current_source_text"] = None
-                        item["verified"] = False
-                        continue
-                    self.registry.assert_source(self.owner, agent_id, ref["app"], ref["channel"])
-                    row = db.execute("SELECT version,deleted,text FROM history_events WHERE app=? AND channel=? "
-                                     "AND source_event_id=?", (ref["app"], ref["channel"], ref["source_event_id"])).fetchone()
-                    item["resolution"] = ("missing" if row is None else "deleted" if row[1] else
-                                          "current" if row[0] == ref["version"] else "source_changed")
-                    item["current_source_text"] = row[2] if row and not row[1] else None
-                    item["verified"] = False
-        return evidence
+                ref_scope = (app_id, channel)
+                if scope == OWNER:
+                    try:
+                        ref = json.loads(item['source_ref'])
+                    except (ValueError, TypeError):
+                        ref = None
+                    # owner 跨 app，不跨当前 channel；外通道仅保留历史诊断，不解引用当前正文。
+                    ref_scope = (ref.get('app'), channel) if isinstance(ref, dict) else (None, channel)
+                state = resolve_archive_evidence(db, item, agent_id, *ref_scope)
+                item.update({key: state[key] for key in ("resolution", "current_source_text", "verified")})
+        from thalemora.memory.extensions import scoped_extensions
+        for extension in scoped_extensions(path, archive_path, agent_id, app_id, channel, scope=scope):
+            if extension['card_id'] != card_id:
+                continue
+            for item in extension['evidence_refs']:
+                evidence.append(dict(item, evidence_kind='extension', revision_id=None,
+                                     extension_id=extension['extension_id'],
+                                     base_revision_id=extension['base_revision_id'],
+                                     extension_status=extension['status'],
+                                     eligibility=extension['eligibility']))
+        # Stable order: canonical history first, then extension ID/evidence ID.
+        # IDs belong to separate tables; evidence_kind + id is the identity.
+        return evidence[offset:offset + limit]
 
-    def water(self, agent_id, app_id, channel="main", *, limit=20, offset=0):
+    @staticmethod
+    def _water_scope(scope):
+        validate_scope(scope)
+        if scope != OWNER:
+            raise ValueError("scope_not_supported: Water 仅支持 owner-global")
+
+    def water(self, agent_id, app_id=None, channel="main", *, limit=20, offset=0, scope=SOURCE):
+        self._water_scope(scope)
         self.page(limit, offset)
-        with closing(sqlite3.connect(self.memory_path(agent_id, app_id, channel))) as db:
+        with closing(sqlite3.connect(self.memory_path(agent_id, app_id, channel, scope=scope))) as db:
             db.row_factory = sqlite3.Row
             return [dict(r) for r in db.execute("SELECT * FROM memory_water_nodes ORDER BY node_id LIMIT ? OFFSET ?",
                                                (limit, offset))]
 
-    def water_node(self, agent_id, app_id, node_id, node_type, title, channel="main", parent_node_id=None):
-        with closing(sqlite3.connect(self.memory_path(agent_id, app_id, channel))) as db, db:
-            db.execute("PRAGMA foreign_keys=ON")
+    def water_node(self, agent_id, app_id, node_id, node_type, title, channel="main", parent_node_id=None, *, scope=SOURCE):
+        self._water_scope(scope)
+        path = self.memory_path(agent_id, app_id, channel, scope=scope)
+        with self._memory_transaction(agent_id, app_id, channel, scope, path) as db:
             return {"node_id": create_node(db, node_id=node_id, node_type=node_type, title=title,
                                             origin="manual_ui", parent_node_id=parent_node_id)}
 
-    def water_move(self, agent_id, app_id, card_id, to_node_id, reason, channel="main"):
+    def water_move(self, agent_id, app_id, card_id, to_node_id, reason, channel="main", *, scope=SOURCE):
+        self._water_scope(scope)
         from thalemora.water.growth import move_card
-        with closing(sqlite3.connect(self.memory_path(agent_id, app_id, channel))) as db:
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA foreign_keys=ON")
+        path = self.memory_path(agent_id, app_id, channel, scope=scope)
+        with self._memory_transaction(agent_id, app_id, channel, scope, path) as db:
+            require_card(db, card_id, agent_id, app_id, channel, scope)
             return {"action_id": move_card(db, card_id, to_node_id, reason, actor=self.owner.principal_id)}
 
-    def water_memberships(self, agent_id, app_id, channel="main", *, limit=20, offset=0):
+    def water_memberships(self, agent_id, app_id=None, channel="main", *, limit=20, offset=0, scope=SOURCE):
+        self._water_scope(scope)
         self.page(limit, offset)
-        with closing(sqlite3.connect(self.memory_path(agent_id, app_id, channel))) as db:
+        with closing(sqlite3.connect(self.memory_path(agent_id, app_id, channel, scope=scope))) as db:
             db.row_factory = sqlite3.Row
             return [dict(r) for r in db.execute("SELECT * FROM memory_water_membership ORDER BY card_id LIMIT ? OFFSET ?",
                                                (limit, offset))]
 
-    def local_index(self, agent_id, app_id, channel="main"):
+    def local_index(self, agent_id, app_id=None, channel="main", *, scope=SOURCE):
+        path = self.memory_path(agent_id, app_id, channel, scope=scope)
         if self.embedder is None:
             raise ValueError("本地向量 unconfigured：Python 宿主须显式提供已就绪 embedder 和 model")
         from thalemora.retrieval.core import RetrievalIndex
-        path = self.memory_path(agent_id, app_id, channel)
+        namespace = f"local_owner_{channel}"
+        if scope == SOURCE:
+            with closing(sqlite3.connect(self.registry.registry_path)) as db:
+                source_id = db.execute("SELECT rowid FROM sources WHERE agent_id=? AND app_id=? AND channel=?",
+                                       (agent_id, app_id, channel)).fetchone()[0]
+            namespace = f"local_source_{source_id}"
         model, embedder = self.embedder
-        return RetrievalIndex(str(path.with_name(f"retrieval_{channel}.sqlite")),
+        return RetrievalIndex(str(path.with_name(namespace + ".sqlite")),
                               memory_db_path=str(path), embedding_model=model, embedder=embedder)
 
     def recall_for_turn(self, agent_id, app_id, query, channel="main", **visible):
@@ -264,12 +335,42 @@ class Application:
     def revoke_recall_token(self, token_id):
         return self.recall_tokens.revoke(token_id)
 
-    def build_local_index(self, agent_id, app_id, channel="main"):
-        return self.local_index(agent_id, app_id, channel).rebuild_memory()
+    def _local_rows(self, agent_id, app_id, channel, scope=SOURCE):
+        from thalemora.memory.extensions import scoped_extensions
+        from thalemora.retrieval.core import RetrievalIndex
+        from thalemora.retrieval.recall import scoped_rows
+        path = self.memory_path(agent_id, app_id, channel, scope=scope)
+        archive_path = self.registry.archive_db_path(self.owner, agent_id)
+        if scope == SOURCE:
+            return scoped_rows(path, app_id, channel, archive_path, agent_id)[0]
+        # owner 索引只供显式管理，不供自动召回；扩展仍是独立、有自身有效证据的 delta。
+        extensions = {e['extension_id']: e for e in
+                      scoped_extensions(path, archive_path, agent_id, app_id, channel, scope=scope) if e['eligible']}
+        rows = []
+        for row in RetrievalIndex._memory_rows(str(path)):
+            extension_id = row['provenance'].get('extension_id')
+            if extension_id is not None:
+                if extension_id not in extensions:
+                    continue
+                row['provenance']['evidence_refs'] = extensions[extension_id]['evidence_refs']
+            rows.append(row)
+        return rows
 
-    def local_search(self, agent_id, app_id, query, channel="main", *, limit=20):
+    def build_local_index(self, agent_id, app_id=None, channel="main", *, scope=SOURCE):
+        index = self.local_index(agent_id, app_id, channel, scope=scope)
+        return index._replace_lane('memory_card', lambda: self._local_rows(agent_id, app_id, channel, scope),
+                                   source_path=index.memory_db_path, embedder=index.embedder)
+
+    def local_search(self, agent_id, app_id, query, channel="main", *, limit=20, scope=SOURCE):
         page_size(limit)
-        return self.local_index(agent_id, app_id, channel).search(query, top_k=limit, pool=100)
+        from thalemora.retrieval.recall import ensure_current_index
+        index = self.local_index(agent_id, app_id, channel, scope=scope)
+        ensure_current_index(index, lambda: self._local_rows(agent_id, app_id, channel, scope), index.embedder)
+        hits = index.search(query, top_k=100, pool=100)
+        latest = {r['source_key']: r for r in self._local_rows(agent_id, app_id, channel, scope)}
+        return [h for h in hits if h['source_key'] in latest
+                and h['provenance'] == latest[h['source_key']]['provenance']
+                and h['text'] == latest[h['source_key']]['text']][:limit]
 
     def inner_state(self, agent_id, app_id, kind, channel="main", *, limit=20, offset=0):
         self.page(limit, offset)

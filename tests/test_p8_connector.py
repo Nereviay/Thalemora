@@ -146,6 +146,27 @@ class ConnectorTests(unittest.TestCase):
             self.assertEqual(self.recall().status_code, 504)
         self.assertEqual(self.client.get("/api/list_agents", headers=self.admin).status_code, 200)
 
+    def test_embedding_outage_keeps_real_application_lexical_recall_and_empty_warning(self):
+        self.insert('tea','我喜欢乌龙茶')
+        self.service.remember(self.agent,'demo','tea')
+        self.insert('raw','乌龙茶在合成店铺有售')
+        class Broken:
+            def encode_many(self,texts,**kw): raise ProviderUnavailable('private-model-detail')
+            def encode_one(self,text): raise AssertionError('document failure must not retry query')
+        self.service.providers.local_models['embedding']=('synthetic',Broken())
+        self.service.providers.configure('embedding',mode='local',model='synthetic')
+        response=self.recall(message='乌龙茶')
+        self.assertEqual(response.status_code,200)
+        data=response.json()
+        self.assertEqual(data['errors'],['embedding_unavailable'])
+        self.assertTrue(data['memories'])
+        self.assertEqual(data['archive'],[{'id':'raw','version':1}])
+        self.assertNotIn('private-model-detail',response.text)
+        empty=self.recall(message='量子计算')
+        self.assertEqual(empty.status_code,200)
+        self.assertTrue(empty.json()['empty'])
+        self.assertEqual(empty.json()['errors'],['embedding_unavailable'])
+
     def test_documented_host_inserts_before_fake_upstream_and_continues_on_failure(self):
         doc = Path(__file__).resolve().parents[1] / "docs/RECALL_API.md"
         namespace = {}

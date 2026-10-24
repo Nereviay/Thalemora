@@ -33,6 +33,13 @@ CREATE TABLE IF NOT EXISTS cards (
 
 CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status);
 
+CREATE TABLE IF NOT EXISTS archive_card_scopes (
+    card_id INTEGER PRIMARY KEY REFERENCES cards(id),
+    app TEXT NOT NULL,
+    channel TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_archive_card_scopes_source ON archive_card_scopes(app,channel,card_id);
+
 CREATE TABLE IF NOT EXISTS card_revisions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,

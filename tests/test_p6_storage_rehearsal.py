@@ -6,6 +6,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from thalemora.memory import schema
 from thalemora.memory.revision_store import create_card
@@ -48,14 +49,51 @@ class StorageRehearsalTest(unittest.TestCase):
             writer.execute("PRAGMA journal_mode=WAL")
             writer.execute("INSERT INTO legacy_rows VALUES(8,?)", (b"synthetic-wal",))
             writer.commit()
+            source = self.source / "memory_ops.sqlite"
+            wal = self.source / "memory_ops.sqlite-wal"
+            self.assertGreater(wal.stat().st_size, 32)
+            before = (source.read_bytes(), wal.read_bytes())
             report = snapshot(self.source, self.root / "snapshot")
+            self.assertEqual(before, (source.read_bytes(), wal.read_bytes()))
+            self.assertEqual(("wal",), writer.execute("PRAGMA journal_mode").fetchone())
             self.assertEqual(2, report["databases"]["memory_ops.sqlite"]["tables"]["legacy_rows"])
             self.assertEqual(2, writer.execute("SELECT COUNT(*) FROM legacy_rows").fetchone()[0])
+            target = self.root / "snapshot/memory_ops.sqlite"
+            self.assertEqual(set(DATABASES) | {"snapshot.json"},
+                             {p.name for p in target.parent.iterdir()})
+            with closing(sqlite3.connect(target.as_uri() + "?mode=ro", uri=True)) as db:
+                self.assertEqual(("delete",), db.execute("PRAGMA journal_mode").fetchone())
+                self.assertEqual((b"synthetic-wal",), db.execute(
+                    "SELECT payload FROM legacy_rows WHERE id=8").fetchone())
+                self.assertEqual([("ok",)], db.execute("PRAGMA quick_check").fetchall())
+            self.assertFalse(Path(str(target) + "-wal").exists())
+            self.assertFalse(Path(str(target) + "-shm").exists())
         self.assertFalse(report["cross_database_atomic"])
         self.assertFalse((self.root / "snapshot/assistant_channel.sqlite").exists())
         self.assertFalse((self.root / "snapshot/prompt.json").exists())
         self.assertEqual(0o700, os.stat(self.root / "snapshot").st_mode & 0o777)
         self.assertEqual(0o600, os.stat(self.root / "snapshot/memory.db").st_mode & 0o777)
+
+    def test_journal_finalization_failure_does_not_emit_success(self):
+        connect = sqlite3.connect
+        for outcome in ("wal", sqlite3.OperationalError("synthetic journal failure")):
+            with self.subTest(outcome=outcome):
+                class RefusingConnection(sqlite3.Connection):
+                    def execute(self, sql, *args):
+                        if sql == "PRAGMA journal_mode=DELETE":
+                            if isinstance(outcome, Exception):
+                                raise outcome
+                            return super().execute("SELECT 'wal'")
+                        return super().execute(sql, *args)
+
+                target = self.root / ("error" if isinstance(outcome, Exception) else "refused")
+                with patch("tools.niannian_storage_rehearsal.sqlite3.connect",
+                           side_effect=lambda *a, **kw: connect(*a, factory=RefusingConnection, **kw)):
+                    with self.assertRaises(sqlite3.OperationalError if isinstance(outcome, Exception)
+                                           else ValueError):
+                        snapshot(self.source, target)
+                self.assertFalse((target / "snapshot.json").exists())
+                self.assertFalse((target / "compatibility.json").exists())
 
     def test_core_reads_preserve_all_rows_manual_identity_and_legacy(self):
         report = rehearse(self.source, self.root / "work")

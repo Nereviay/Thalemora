@@ -2,7 +2,6 @@
 
 from contextlib import closing
 import json
-import math
 import os
 import sqlite3
 from urllib.request import Request, urlopen
@@ -116,7 +115,8 @@ class Providers:
             db.row_factory = sqlite3.Row
             return [dict(r) for r in db.execute("SELECT * FROM calls ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))]
 
-    def call(self, module, text, *, max_tokens=128, messages=None, json_output=False, documents=None):
+    def call(self, module, text, *, max_tokens=128, messages=None, json_output=False, documents=None,
+             expected_config=None):
         self.module(module)
         if module == "rerank" and (not isinstance(documents, list) or not 1 <= len(documents) <= 12
                                    or any(not isinstance(d, str) or not d or len(d) > 16000 for d in documents)):
@@ -135,6 +135,10 @@ class Providers:
         with self.connect() as db, db:
             db.execute("BEGIN IMMEDIATE")
             config = self._config(db, module)
+            if expected_config is not None and any(config.get(k) != expected_config.get(k) for k in
+                    ("mode", "enabled", "base_url", "model", "key_env", "capability")):
+                from thalemora.retrieval.core import VectorContractError
+                raise VectorContractError("embedding provider identity changed during recall")
             state = self._state(module, config)
             count, tokens = db.execute("SELECT COUNT(*),COALESCE(SUM(tokens),0) FROM calls "
                                       "WHERE module=? AND status IN ('pending','success','error')", (module,)).fetchone()
@@ -146,8 +150,10 @@ class Providers:
                                  (module, "pending" if state == "ready" else "blocked", None if state == "ready" else state)).lastrowid
         if state != "ready":
             raise ProviderUnavailable(state)
+        from thalemora.retrieval.core import VectorContractError
         usage = None
         tokens = None
+        response_received = False
         try:
             if module == "embedding":
                 endpoint = "/embeddings"
@@ -168,7 +174,10 @@ class Providers:
                               headers={"Authorization": "Bearer " + os.environ[config["key_env"]],
                                        "Content-Type": "application/json"})
             with urlopen(request, timeout={"embedding": 5, "rerank": 3}.get(module, 30)) as response:
+                response_received = True
                 result = json.load(response)
+            if not isinstance(result, dict):
+                raise ValueError("provider response must be an object")
             usage = result.get("usage")
             if usage is not None:
                 actual = usage.get("total_tokens")
@@ -176,10 +185,11 @@ class Providers:
                     raise ValueError("provider usage 缺少有效 total_tokens")
                 tokens = actual
             if module == "embedding":
+                from thalemora.retrieval.core import VectorContractError, unit_vector
+                if "model" in result and result["model"] != config["model"]:
+                    raise VectorContractError("embedding response model does not match configured model")
                 output = result["data"][0]["embedding"]
-                if (not isinstance(output, list) or not output
-                        or any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in output)):
-                    raise ValueError("embedding 必须为非空有限数值向量")
+                unit_vector(output)  # validate here too; cache boundary normalizes it
             elif module == "rerank":
                 output = result["results"]
                 from thalemora.retrieval.models import rerank_scores
@@ -190,9 +200,17 @@ class Providers:
             if usage is None:
                 raise ValueError("provider 未返回实际 usage；本次成本未知，需核查")
         except Exception as exc:
+            # Audit every failure, but only classify known embedding transport /
+            # response failures as optional. Code/access errors retain their type.
             with self.connect() as db, db:
                 db.execute("UPDATE calls SET status='error',tokens=?,usage=?,error=? WHERE id=?",
                            (tokens, json.dumps(usage), type(exc).__name__, call_id))
+            if module == "embedding":
+                transport = isinstance(exc, (OSError, ProviderUnavailable)) and not isinstance(exc, PermissionError)
+                protocol = response_received and isinstance(exc, (ValueError, KeyError, TypeError))
+                if isinstance(exc, VectorContractError) or not (transport or protocol):
+                    raise
+            # Existing non-embedding provider / Rerank behavior stays unchanged.
             raise ProviderUnavailable(f"provider error: {type(exc).__name__}") from exc
         with self.connect() as db, db:
             db.execute("UPDATE calls SET status='success',tokens=?,usage=? WHERE id=?",

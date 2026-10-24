@@ -200,8 +200,9 @@ class RecallTests(unittest.TestCase):
         result = self.recall()
         self.assertEqual(len(result["memories"]) + len(result["archive"]), 1)
         self.assertEqual(self.app.providers.configure("embedding", mode="local", model="missing-local-model")["state"], "unconfigured")
-        with self.assertRaises(ProviderUnavailable):
-            self.recall()
+        unavailable = self.recall()
+        self.assertTrue(unavailable["rendered"])
+        self.assertEqual(unavailable["errors"][0]["code"], "embedding_unavailable")
         self.app.providers.configure("embedding", mode="disabled")
         def broken(query, docs):
             raise RuntimeError("synthetic local failure")

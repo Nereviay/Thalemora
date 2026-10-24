@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import numpy as np
 import json
 
 import os
 
-from typing import Mapping,Sequence
-
-from thalemora.retrieval.core import RetrievalIndex, RetrievalShadowError, _ro, _sha, _now, _stable_json
+from thalemora.retrieval.core import RetrievalIndex, RetrievalShadowError, _ro, _sha
 
 RAW_SOURCES = ("app", "rikkahub", "rikkahub_import", "gateway", "heartbeat")
 
@@ -86,67 +83,49 @@ class NiannianRetrievalIndex(RetrievalIndex):
         return out
 
     def rebuild_raw(self, raw_db: str, runtime_db: str | None, *, max_events: int | None=None, embedder=None, batch_size: int=16) -> dict:
-        rows = self._raw_rows(raw_db, runtime_db, max_events=max_events)
-        return self._replace_lane('raw_event', rows, source_path=raw_db, embedder=embedder, batch_size=batch_size)
+        return self._replace_lane('raw_event',
+            lambda: self._raw_rows(raw_db, runtime_db, max_events=max_events),
+            source_path=raw_db, embedder=embedder, batch_size=batch_size)
 
     def sync_delivered_proactive(self, raw_db: str, runtime_db: str, *, embedder=None, batch_size: int=16) -> dict:
-        """One-time/maintenance backfill of delivered heartbeat speech only.
-
-        Other raw sources, memory cards and unchanged embeddings are untouched.
-        """
-        rows = [item for item in self._raw_rows(raw_db, runtime_db) if item['provenance']['source'] == 'heartbeat']
-        by_key = {row['source_key']: row for row in rows}
+        """Replace only delivered heartbeat units, using the shared lane fence."""
+        expected = self._generation('raw_event')
+        rows = [r for r in self._raw_rows(raw_db, runtime_db) if r['provenance']['source'] == 'heartbeat']
         with self._connect() as conn:
-            existing = {row['source_key']: row for row in conn.execute('SELECT source_key,content_hash,vector FROM chunks WHERE source_kind=\'raw_event\' AND provenance_json LIKE \'%"source":"heartbeat"%\'')}
-        to_update = [row for row in rows if row['source_key'] not in existing or existing[row['source_key']]['content_hash'] != row['content_hash'] or (embedder is not None and existing[row['source_key']]['vector'] is None)]
-        vectors = embedder.encode_many([row['text'] for row in to_update], batch_size=batch_size) if embedder is not None and to_update else None
-        if vectors is not None and len(vectors) != len(to_update):
-            raise RetrievalShadowError('embedder returned wrong vector count')
-        stale = sorted(set(existing) - set(by_key))
-        with self._connect() as conn:
-            for key in stale:
-                conn.execute('DELETE FROM chunks_fts WHERE source_key=?', (key,))
-                conn.execute('DELETE FROM chunks WHERE source_key=?', (key,))
-            for (i, row) in enumerate(to_update):
-                vector = np.asarray(vectors[i], dtype=np.float32).reshape(-1) if vectors is not None else None
-                conn.execute('DELETE FROM chunks_fts WHERE source_key=?', (row['source_key'],))
-                conn.execute('DELETE FROM chunks WHERE source_key=?', (row['source_key'],))
-                conn.execute('INSERT INTO chunks(source_kind,source_key,source_id,raw_event_start_id,raw_event_end_id,epoch_id,role,event_time,status,title,text,content_hash,provenance_json,vector,vector_dim,embedding_model,embedded_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', ('raw_event', row['source_key'], row['source_id'], row['raw_event_start_id'], row['raw_event_end_id'], row['epoch_id'], row['role'], row['event_time'], '', '', row['text'], row['content_hash'], _stable_json(row['provenance']), None if vector is None else vector.tobytes(), None if vector is None else int(vector.size), getattr(embedder, 'model_name', None) if vector is not None else None, _now() if vector is not None else None, _now()))
-                conn.execute('INSERT INTO chunks_fts(source_key,text) VALUES(?,?)', (row['source_key'], row['text']))
-        return {'eligible': len(rows), 'updated': len(to_update), 'removed': len(stale), 'new_embeddings': len(to_update) if vectors is not None else 0}
+            existing = {r['source_key']: r for r in conn.execute(
+                "SELECT * FROM chunks WHERE source_kind='raw_event' "
+                "AND json_extract(provenance_json,'$.source')='heartbeat'")}
+        updated = sum(r['source_key'] not in existing
+                      or existing[r['source_key']]['content_hash'] != r['content_hash']
+                      or json.loads(existing[r['source_key']]['provenance_json']) != r['provenance']
+                      or (embedder is not None and not self._vector_bound(existing[r['source_key']], self.embedding_model))
+                      for r in rows)
+        stale = len(set(existing) - {r['source_key'] for r in rows})
+        result = self._replace_lane('raw_event', rows, source_path=raw_db,
+            embedder=embedder, batch_size=batch_size, expected_generation=expected,
+            selector=("json_extract(provenance_json,'$.source')='heartbeat'", ()))
+        return dict(eligible=len(rows), updated=0 if result['discarded'] else updated,
+                    removed=0 if result['discarded'] else stale,
+                    new_embeddings=result['embedded_count'], discarded=result['discarded'])
 
     def refresh_delivered_proactive(self, raw_db: str, runtime_db: str, raw_event_id: int, *, embedder=None) -> dict:
-        """Index one canonical delivered proactive event without rebuilding other history."""
+        """Refresh one heartbeat; inference must never hold SQLite's write lock."""
         raw_id = int(raw_event_id)
         if raw_id <= 0:
             raise ValueError('positive raw_event_id required')
-        rows = self._raw_rows(raw_db, runtime_db, raw_event_id=raw_id)
-        row = next((item for item in rows if item['provenance']['source'] == 'heartbeat'), None)
-        source_key = f'raw:{raw_id}'
+        expected = self._generation('raw_event')
+        rows = [r for r in self._raw_rows(raw_db, runtime_db, raw_event_id=raw_id)
+                if r['provenance']['source'] == 'heartbeat']
         with self._connect() as conn:
-            previous = conn.execute("SELECT content_hash,vector,vector_dim,embedding_model,embedded_at,provenance_json FROM chunks WHERE source_key=? AND source_kind='raw_event'", (source_key,)).fetchone()
-            if previous:
-                old_source = json.loads(previous['provenance_json']).get('source')
-                if old_source != 'heartbeat':
-                    raise RetrievalShadowError('raw_event key belongs to another source')
-            if row is None:
-                if previous:
-                    conn.execute('DELETE FROM chunks_fts WHERE source_key=?', (source_key,))
-                    conn.execute('DELETE FROM chunks WHERE source_key=?', (source_key,))
-                return {'raw_event_id': raw_id, 'present': False}
-            if previous and previous['content_hash'] == row['content_hash'] and previous['vector']:
-                return {'raw_event_id': raw_id, 'present': True, 'unchanged': True}
-            if embedder is None:
-                vector = None
-                model_name = None
-            else:
-                vector = np.asarray(embedder.encode_one(row['text']), dtype=np.float32).reshape(-1)
-                model_name = getattr(embedder, 'model_name', embedder.__class__.__name__)
-            conn.execute('DELETE FROM chunks_fts WHERE source_key=?', (source_key,))
-            conn.execute('DELETE FROM chunks WHERE source_key=?', (source_key,))
-            conn.execute('INSERT INTO chunks(source_kind,source_key,source_id,raw_event_start_id,raw_event_end_id,epoch_id,role,event_time,status,title,text,content_hash,provenance_json,vector,vector_dim,embedding_model,embedded_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', ('raw_event', source_key, raw_id, raw_id, raw_id, row['epoch_id'], row['role'], row['event_time'], '', '', row['text'], row['content_hash'], _stable_json(row['provenance']), None if vector is None else vector.tobytes(), None if vector is None else int(vector.shape[0]), model_name, _now() if vector is not None else None, _now()))
-            conn.execute('INSERT INTO chunks_fts(source_key,text) VALUES(?,?)', (source_key, row['text']))
-        return {'raw_event_id': raw_id, 'present': True, 'embedded': vector is not None}
+            previous = conn.execute("SELECT * FROM chunks WHERE source_key=?", (f'raw:{raw_id}',)).fetchone()
+        if previous and json.loads(previous['provenance_json']).get('source') != 'heartbeat':
+            raise RetrievalShadowError('raw_event key belongs to another source')
+        result = self._replace_lane('raw_event', rows, source_path=raw_db, embedder=embedder,
+            expected_generation=expected, selector=('source_key=?', (f'raw:{raw_id}',)), single=True)
+        return dict(raw_event_id=raw_id, present=bool(rows), embedded=bool(result['embedded_count']),
+                    unchanged=bool(rows and previous and previous['content_hash'] == rows[0]['content_hash']
+                                   and self._vector_bound(previous, self.embedding_model)),
+                    discarded=result['discarded'])
 
     def search_lane(self, query: str, source_kind: str, *, embedder=None, current_epoch_id: str='', top_k: int=8, pool: int=40) -> list[dict]:
         if source_kind not in {'memory_card', 'raw_event'}:
@@ -162,7 +141,7 @@ class NiannianRetrievalIndex(RetrievalIndex):
             reasons.setdefault(key, []).append(f'lexical_rank:{rank}')
         for (rank, (key, cosine)) in enumerate(vector, 1):
             scores[key] = scores.get(key, 0.0) + 1.0 / (60.0 + rank)
-            reasons.setdefault(key, []).append(f'vector_rank:{rank}:{cosine:.4f}')
+            reasons.setdefault(key, []).append(f'vector_rank:{rank}:{cosine!r}')
         if not scores:
             return []
         keys = list(scores)

@@ -124,7 +124,10 @@ class P4Tests(unittest.TestCase):
             args = dict(agent_id=self.a, app_id=self.app, channel='private')
             if operation == 'search': args['query'] = '旅行计划'
             if operation == 'inner_state': args['kind'] = 'diary'
-            self.assertEqual(self.get(operation, **args).status_code, 403)
+            reply = self.get(operation, **args)
+            self.assertEqual(reply.status_code, 400 if operation == 'water' else 403)
+            if operation == 'water':
+                self.assertIn('scope_not_supported', reply.json()['error'])
         self.service.grant_source(self.a, self.app, 'private')
         self.insert(channel='private', text='私有合成记忆')
         self.assertEqual(self.service.history(self.a, self.app), [])
@@ -189,13 +192,13 @@ class P4Tests(unittest.TestCase):
     def test_water_real_nodes_membership_and_core_constraints(self):
         self.insert()
         card = self.service.remember(self.a, self.app, 'synthetic-1')['card_id']
-        self.service.water_node(self.a, self.app, 'lake-1', 'lake', '合成湖')
-        self.service.water_node(self.a, self.app, 'stream-1', 'stream', '合成溪', parent_node_id='lake-1')
-        self.service.water_move(self.a, self.app, card, 'stream-1', '合成归属')
-        self.assertEqual(len(self.service.water(self.a, self.app)), 2)
-        self.assertEqual(self.service.water_memberships(self.a, self.app)[0]['container_node_id'], 'stream-1')
+        self.service.water_node(self.a, self.app, 'lake-1', 'lake', '合成湖', scope='owner-global')
+        self.service.water_node(self.a, self.app, 'stream-1', 'stream', '合成溪', parent_node_id='lake-1', scope='owner-global')
+        self.service.water_move(self.a, self.app, card, 'stream-1', '合成归属', scope='owner-global')
+        self.assertEqual(len(self.service.water(self.a, self.app, scope='owner-global')), 2)
+        self.assertEqual(self.service.water_memberships(self.a, self.app, scope='owner-global')[0]['container_node_id'], 'stream-1')
         with self.assertRaises(ValueError):
-            self.service.water_move(self.a, self.app, card, 'lake-1', '不允许归属湖')
+            self.service.water_move(self.a, self.app, card, 'lake-1', '不允许归属湖', scope='owner-global')
 
     def test_no_host_autonomous_writes_and_epoch_candidate_fail_honestly(self):
         with self.assertRaises(AgentRequired):
@@ -326,7 +329,7 @@ class P4Tests(unittest.TestCase):
     def test_snapshot_restore_all_domains_identity_and_usage(self):
         self.insert()
         self.service.remember(self.a, self.app, 'synthetic-1')
-        self.service.water_node(self.a, self.app, 'lake-1','lake','合成湖')
+        self.service.water_node(self.a, self.app, 'lake-1','lake','合成湖', scope='owner-global')
         self.service.configure_persona(self.a, self.app, authority='managed', expected_version=0,
                                       reason='合成', recorded_at=NOW, content='合成人格')
         host = self.host()

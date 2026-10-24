@@ -60,6 +60,10 @@ def snapshot(source, destination):
                 if time.monotonic() - start > 60:
                     raise TimeoutError(f"SQLite backup 超时: {name}")
             src.backup(dst, pages=256, progress=progress, sleep=0.02)
+            # backup 会继承 WAL；仅新目标独占收尾，避免首次只读依赖或遗留 sidecar。
+            dst.execute("PRAGMA locking_mode=EXCLUSIVE")
+            if dst.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
+                raise ValueError(f"副本 journal_mode 收尾失败: {name}")
         os.chmod(target, 0o600)
         with closing(reader(target)) as db:
             checks = db.execute("PRAGMA quick_check").fetchall()

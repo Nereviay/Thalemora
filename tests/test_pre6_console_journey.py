@@ -107,8 +107,40 @@ class FirstUseJourney(unittest.TestCase):
                     self.page.locator("#detailBody").filter(has_text="纯合成示例").wait_for()
                     self.page.get_by_role("button", name="关闭", exact=True).click()
                     card = self.service.memory(agent, "demo-app")[0]
+                    # F5：真实 UI 默认 source，显式 owner 才显示 B 与未知旧卡。
+                    self.service.grant_source(agent, "other-app")
+                    self.service.import_history(agent, "other-app", [dict(app="other-app", source_event_id="b-only", version=1,
+                        role="user", text="合成B应用独有约定")])
+                    self.service.remember(agent, "other-app", "b-only")
+                    from thalemora.memory.revision_store import create_card
+                    create_card(self.service.memory_path(agent, "demo-app", "main"), content="合成归属未知旧卡",
+                                origin="manual_ui", source="manual", evidence_source_kind="manual", evidence_source_ref="old text")
+                    self.page.locator("#refresh").click()
+                    self.page.wait_for_function("!document.querySelector('#refresh').disabled")
+                    self.assertEqual(self.page.locator("#content .record").count(), 1)
+                    self.assertEqual(self.page.get_by_label("记忆查看范围").input_value(), "source-scoped")
+                    self.page.get_by_label("记忆查看范围").select_option("owner-global")
+                    self.page.get_by_role("button", name="切换查看范围").click()
+                    self.page.locator("#count").filter(has_text="3 条").wait_for()
+                    self.page.get_by_text("管理员视图：该 Agent 当前通道的全部来源", exact=False).wait_for()
+                    self.page.get_by_text("归属：unknown", exact=True).wait_for()
+                    self.screenshot("05-f5-owner-memory.png")
+                    b_record = self.page.locator("#content .record").filter(has_text="合成B应用独有约定")
+                    b_record.get_by_role("button", name="查看来源证据").click()
+                    self.page.locator("#detailBody").filter(has_text="other-app").wait_for()
+                    self.page.get_by_role("button", name="关闭", exact=True).click()
+                    self.page.locator("#appId").fill("other-app")
+                    self.page.locator("#appId").dispatch_event("change")
+                    self.page.locator("#count").filter(has_text="1 条").wait_for()
+                    self.assertEqual(self.page.get_by_label("记忆查看范围").input_value(), "source-scoped")
+                    self.assertIn("合成B应用独有约定", self.page.locator("#content").inner_text())
+                    self.page.locator("#appId").fill("demo-app")
+                    self.page.locator("#appId").dispatch_event("change")
+                    self.page.locator("#content").get_by_text("纯合成示例：我想整理一次旅行计划。").wait_for()
+                    self.assertNotIn("合成B应用", self.page.locator("#content").inner_text())
 
                     self.view("Water · 水系")
+                    self.page.get_by_text("管理员水系：该 Agent 当前通道的全部来源", exact=False).wait_for()
                     self.page.get_by_text("添加湖 / 溪流 / 支流", exact=True).click()
                     self.page.get_by_label("节点 ID", exact=True).fill("synthetic-lake")
                     self.page.get_by_label("类型：lake / stream / branch").fill("lake")
@@ -155,14 +187,14 @@ class FirstUseJourney(unittest.TestCase):
                     self.page.locator("#content").get_by_text("synthetic-stream", exact=True).wait_for()
                     self.page.locator("#count").filter(has_text="2 个节点 · 1 条归属").wait_for()
                     self.screenshot("04-reopened-mobile.png")
-                    self.assertEqual(self.service.water_memberships(agent, "demo-app")[0]["container_node_id"], "synthetic-stream")
+                    self.assertEqual(self.service.water_memberships(agent, "demo-app", scope="owner-global")[0]["container_node_id"], "synthetic-stream")
                     self.assertEqual(len(self.service.history(agent, "demo-app")), 2)
                     self.assertEqual(len(self.service.memory(agent, "demo-app")), 1)
                     # 合成归属数超过节点数与单页容量时，第二页仍须可见。
                     for _ in range(20):
                         extra = self.service.remember(agent, "demo-app", "synthetic-001")
                         self.service.water_move(agent, "demo-app", extra["card_id"],
-                                                "synthetic-stream", "合成分页验证")
+                                                "synthetic-stream", "合成分页验证", scope="owner-global")
                     self.page.locator("#refresh").click()
                     self.page.locator("#count").filter(has_text="20 条归属").wait_for()
                     self.assertTrue(self.page.locator("#next").is_enabled())

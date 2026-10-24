@@ -41,6 +41,24 @@
 
 通过 MCP 修订记忆时，先读取卡片的 `current_revision_id`，再把它作为 `expected_current_revision_id` 提交。这样可以避免覆盖他人刚做的修改。每次明确调用 `remember` 都会创建一张人工记忆卡，不应把它当成重复调用也只生成一张卡的接口。
 
+### 查看范围：应用来源与管理员
+
+`memory`、`evidence`、`revise_memory` 和本地索引/搜索默认 `scope="source-scoped"`：只处理指定 `agent_id/app_id/channel` 的卡片。列表先按归属筛选再分页；外域或归属不明的卡 ID 返回 `card_outside_scope`，不返回其正文、证据或当前修订 ID。来源后来改变或删除不影响历史归属；自动召回仍检查证据时效。
+
+需要跨应用管理时，显式选择 `scope="owner-global"`；它只覆盖**该 Agent 的当前通道**，不跨 Agent、owner 或 main/private。管理台 Memory 页可切换查看范围并查看归属诊断。旧卡无法唯一解释归属或存在冲突时，仅管理员可查看/修订；编辑不会自动认领或迁移归属。
+
+此模式是查看/操作范围，不是身份凭据。只有现有管理凭据、受保护 MCP 和可信本机 Python 宿主可用；专用召回凭据不接受此参数。owner 列表可不提供 `app_id`；需卡 ID 的 MCP 工具可传 `app_id: null`。例如：
+
+```python
+print(s.memory(agent, "demo-app"))  # 默认只看该来源
+print(s.memory(agent, scope="owner-global"))  # 同 Agent/main 的全部来源
+s.water_node(agent, None, "lake", "lake", "旅行湖", scope="owner-global")
+```
+
+Water 第一版整个管理面（包括节点、移动和成员）仅支持显式 `owner-global`；默认 source 调用返回 `scope_not_supported`，不假装按 app 分树。管理台会明确显示跨来源范围并发送此参数。本地 source/owner 索引各自隔离；owner 搜索仅为管理查看，不接入自动召回。
+
+这是默认范围收紧，旧管理调用若确实需要跨应用，必须显式指定 owner 模式。HTTP 未开放 `revise_memory`；人工修订仍走既有 MCP/Python 入口。
+
 ## Python 接入
 
 在安装洄海的 Python 环境中运行：

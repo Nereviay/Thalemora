@@ -192,7 +192,12 @@ assert result['jobs'][0]['status'] == 'done'
         self.provider.action = "extend"
         result = self.tick()
         self.assertEqual("done", result["jobs"][0]["status"])
-        self.assertEqual(card, self.cards()[0])
+        after = self.cards()[0]
+        self.assertEqual({k: v for k, v in card.items() if k != 'extensions'},
+                         {k: v for k, v in after.items() if k != 'extensions'})
+        self.assertEqual(len(after['extensions']), 1)
+        self.assertEqual(after['extensions'][0]['content'], '合成项目增加一项长期约定')
+        self.assertTrue(after['extensions'][0]['eligible'])
         path = self.app.memory_path(self.agent, "synthetic-app", "main")
         with closing(sqlite3.connect(path)) as db:
             self.assertEqual(1, db.execute("SELECT COUNT(*) FROM memory_extensions").fetchone()[0])

@@ -31,6 +31,7 @@ let token = "",
   cursors = [],
   rows = [],
   query = "",
+  memoryScope = "source-scoped",
   agentOffset = 0,
   loading = false,
   revision = 0;
@@ -97,6 +98,7 @@ function reset() {
   cursor = 0;
   cursors = [];
   query = "";
+  memoryScope = "source-scoped";
 }
 async function agents() {
   const previous = $("#agent").value;
@@ -206,8 +208,8 @@ async function renderModels() {
       ["model", "本地模型标识或目录 / API 模型名", "text", config.model || ""],
       ["base_url", "API base URL（自动追加 /embeddings 或 /rerank）", "text", config.base_url || ""],
       ["key_env", "服务端 Key 环境变量名", "text", config.key_env || ""],
-      ["call_budget", "累计调用预算", "number", config.call_budget || 0],
-      ["token_budget", "累计 token 准入阈值", "number", config.token_budget || 0],
+      ["call_budget", "累计调用预算（硬上限）", "number", config.call_budget || 0],
+      ["token_budget", "累计 token 阈值（可能超出）", "number", config.token_budget || 0],
     ], "保存 " + module, async (v) => {
       v.module = module;
       v.call_budget = Number(v.call_budget);
@@ -230,8 +232,8 @@ async function renderModels() {
         ["model", "模型名"],
         ["key_env", "服务端 Key 环境变量名"],
         ["capability", "能力：chat / embedding"],
-        ["call_budget", "累计调用预算", "number", "0"],
-        ["token_budget", "累计 token 准入阈值", "number", "0"],
+        ["call_budget", "累计调用预算（硬上限）", "number", "0"],
+        ["token_budget", "累计 token 阈值（可能超出）", "number", "0"],
         ["enabled", "启用调用", "checkbox"],
       ],
       "保存配置",
@@ -380,26 +382,43 @@ async function load() {
       );
       addImport();
     } else if (view === "memory") {
-      rows = await api("memory", { ...s, ...page });
+      const memoryArgs = { ...s, scope: memoryScope };
+      $("#tools").append(form(
+        [["scope", "记忆查看范围", "select", memoryScope, [
+          ["source-scoped", "当前应用来源（默认）"],
+          ["owner-global", "管理员：该 Agent 当前通道的全部来源"],
+        ]]], "切换查看范围", async (v) => {
+          reset();
+          memoryScope = v.scope;
+          await load();
+        },
+      ));
+      $("#tools").append(node("p", memoryScope === "owner-global"
+        ? "管理员视图：该 Agent 当前通道的全部来源；未知或冲突归属仅供管理员处理。"
+        : "仅查看当前应用来源的记忆；来源更新或删除不抹除历史归属。", "muted"));
+      rows = await api("memory", { ...memoryArgs, ...page });
       for (const r of rows) {
         const a = record(r, r.title || "记忆 #" + r.id, r.content);
+        if (r.ownership) a.append(node("small", "归属：" + (r.ownership.app || r.ownership.state)));
         a.append(
           action("查看来源证据", async () =>
             details(
-              await api("evidence", { ...s, card_id: r.id, limit, offset: 0 }),
+              await api("evidence", { ...memoryArgs, card_id: r.id, limit, offset: 0 }),
             ),
           ),
         );
       }
     } else if (view === "water") {
-      rows = await api("water", { ...s, ...page });
+      const ownerArgs = { agent_id: s.agent_id, channel: s.channel, scope: "owner-global" };
+      $("#tools").append(node("p", "管理员水系：该 Agent 当前通道的全部来源；不按应用分树。", "muted"));
+      rows = await api("water", { ...ownerArgs, ...page });
       for (const r of rows)
         record(
           r,
           r.title,
           `${r.node_type} · ${r.node_id} · 上级 ${r.parent_node_id || "海"}`,
         );
-      const memberships = await api("water_memberships", { ...s, ...page });
+      const memberships = await api("water_memberships", { ...ownerArgs, ...page });
       membershipsCount = memberships.length;
       for (const r of memberships)
         record(r, "记忆 #" + r.card_id + " 的归属", r.container_node_id);
@@ -416,7 +435,7 @@ async function load() {
           "创建节点",
           async (v) => {
             if (v.parent_node_id === "-") v.parent_node_id = null;
-            await api("water_node", { ...s, ...v }, true);
+            await api("water_node", { ...ownerArgs, app_id: null, ...v }, true);
             await load();
           },
         ),
@@ -432,7 +451,7 @@ async function load() {
           async (v) => {
             v.card_id = Number(v.card_id);
             if (v.to_node_id === "-") v.to_node_id = null;
-            await api("water_move", { ...s, ...v }, true);
+            await api("water_move", { ...ownerArgs, app_id: null, ...v }, true);
             await load();
           },
         ),
