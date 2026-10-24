@@ -21,7 +21,7 @@ sudo apt install -y python3 python3-venv python3-pip git
 下载并安装：
 
 ```bash
-git clone --depth 1 --branch v0.7.0 https://github.com/Nereviay/Thalemora.git
+git clone --depth 1 --branch v0.8.0 https://github.com/Nereviay/Thalemora.git
 cd Thalemora
 python3 -m venv .venv
 ./.venv/bin/python -m pip install -c requirements.lock .

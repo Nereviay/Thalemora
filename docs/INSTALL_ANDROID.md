@@ -27,7 +27,7 @@
    apt-get install -y python3 python3-venv python3-pip git
    ```
 
-4. 按 [Linux Python 安装步骤](INSTALL_LINUX.md#用-python-安装)下载 v0.7.0、创建环境、安装并启动。
+4. 按 [Linux Python 安装步骤](INSTALL_LINUX.md#用-python-安装)下载 v0.8.0、创建环境、安装并启动。
 5. 手机浏览器打开 `http://127.0.0.1:8765`；如需 MCP，按 [MCP 教程](MCP.md)连接。
 
 参考：[RikkaHub 工作区说明](https://docs.rikka-ai.com/zh/extensions/workspace)。

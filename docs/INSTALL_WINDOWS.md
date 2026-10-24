@@ -5,7 +5,7 @@
 ## 1. 下载程序
 
 1. 从 [Python 官网](https://www.python.org/downloads/windows/)安装 Python 3.12，保留 Python Launcher 选项。
-2. 下载 [洄海 v0.7.0 源码 ZIP](https://github.com/Nereviay/Thalemora/archive/refs/tags/v0.7.0.zip)，解压到自己容易找到的文件夹。
+2. 下载 [洄海 v0.8.0 源码 ZIP](https://github.com/Nereviay/Thalemora/archive/refs/tags/v0.8.0.zip)，解压到自己容易找到的文件夹。
 3. 在解压后的项目文件夹点击地址栏，输入 `powershell` 并回车。
 
 不要在压缩包内部运行，也不要把记忆数据放进临时下载目录。
