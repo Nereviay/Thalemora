@@ -85,6 +85,8 @@ Content-Type: application/json
 
 `rendered` 是可以加入上下文的文字；原话引用包含 `id` 与 `version`。无匹配、低信息或已经可见时，返回空文字与 `empty:true`。
 
+当历史原话通过本轮相关性筛选和来源复核后，洄海可在**同一已授权来源、同一有记录的对话及窗口**中补充前后各最多一条原话，注明原说话者和原话 ID。补充内容只使用 `rendered` 原有 700 字符预算的剩余空间，不取代已选中的记忆；实际加入的前后文也会出现在 `archive` 引用列表中，便于客户端下轮通过 `visible_archive_ids` 排除重复。没有可靠的 `conversation_id`、`epoch_id` 或可区分的时间顺序，或相隔超过 30 分钟时不推测相邻关系，继续返回原有召回结果。无需额外 LLM 调用；具体是否出现在聊天模型请求里仍由客户端正确接线决定。
+
 可选 Embedding 缺失、关闭、未就绪、服务调用失败或预算耗尽时，Application 本轮召回保留可用的词法记忆＋历史原话，在 `errors` 中注明 `embedding_unavailable`；不使用旧错误/不同模型向量，也不换模型、启用付费服务或在同轮自动重试。可选重排失败继续保留基础结果，注明 `rerank_unavailable`，两者可以同时出现。
 
 已执行的词法召回无匹配时仍为 HTTP 200、`empty:true` 并带对应 warning，表示“词法无匹配、语义不可用”，**不等同于完整语义召回已成功**。HTTP 保持既有五个字段及 `errors: string[]`；Python 内部 `errors` 为模块诊断对象，Embedding 诊断含 `module=embedding`、`code=embedding_unavailable` 和异常类型，不对 HTTP 透传异常正文。低信息问题在模型前直接返回空结果，不额外加载模型或生成无意义 warning。

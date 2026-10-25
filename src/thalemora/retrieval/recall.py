@@ -1,5 +1,6 @@
 """单轮 Related 召回：正式 Memory 和独立 Archive 仍是唯一来源。"""
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 import json
 import math
 import re
@@ -107,6 +108,64 @@ def ensure_current_index(index, rows, embedder, *, expected_generation=None):
         return index._replace_lane('memory_card', rows, source_path=index.memory_db_path,
                                    embedder=embedder, expected_generation=expected)
     return None
+
+
+def archive_context(archive, app_id, channel, anchor):
+    """只解引用已准入原话的真实邻居；缺少可信全序时不推测上下文。"""
+    archive._authorize(app_id, channel)
+    with closing(sqlite3.connect(archive.path)) as db:
+        db.row_factory = sqlite3.Row
+        db.execute('BEGIN')
+        hit = db.execute(
+            "SELECT * FROM history_events WHERE app=? AND channel=? AND source_event_id=?",
+            (app_id, channel, anchor['id']),
+        ).fetchone()
+        if (not hit or hit['deleted'] or hit['version'] != anchor['version']
+                or hit['text'] != anchor['text'] or hit['role'] not in {'user', 'assistant'}
+                or not (hit['conversation_id'] or '').strip()
+                or not (hit['epoch_id'] or '').strip()):
+            return []
+        # 包括 tombstone 和不可展示行：它们占据真实位置，不越过它们寻找替代邻句。
+        rows = db.execute(
+            "SELECT source_event_id, occurred_at FROM history_events WHERE app=? AND channel=? "
+            "AND conversation_id=? AND epoch_id=?",
+            (app_id, channel, hit['conversation_id'], hit['epoch_id']),
+        )
+        try:
+            anchor_time = datetime.fromisoformat(hit['occurred_at'].replace('Z', '+00:00'))
+        except (AttributeError, ValueError):
+            return []
+        if anchor_time.tzinfo is None:
+            return []
+        anchor_time = anchor_time.astimezone(timezone.utc)
+        timeline = set()
+        before = after = None
+        # 仍校验整个窗口的可信全序，但只传输 ID/时间，单遍找相邻项，不排序正文。
+        for row in rows:
+            try:
+                instant = datetime.fromisoformat(row['occurred_at'].replace('Z', '+00:00'))
+            except (AttributeError, ValueError):
+                return []
+            if instant.tzinfo is None:
+                return []
+            instant = instant.astimezone(timezone.utc)
+            if instant in timeline:
+                return []
+            timeline.add(instant)
+            if instant < anchor_time and (before is None or instant > before[0]):
+                before = (instant, row['source_event_id'])
+            if instant > anchor_time and (after is None or instant < after[0]):
+                after = (instant, row['source_event_id'])
+        neighbors = []
+        for direction, candidate in (('前文', before), ('后文', after)):
+            if candidate is None or abs(candidate[0] - anchor_time) > timedelta(minutes=30):
+                continue
+            row = db.execute(
+                "SELECT * FROM history_events WHERE app=? AND channel=? AND source_event_id=?",
+                (app_id, channel, candidate[1]),
+            ).fetchone()
+            neighbors.append((direction, row, hit['role']))
+        return neighbors
 
 
 def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
@@ -233,4 +292,26 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
         texts.append(text)
         result[key].append(item)
     result["rendered"] = "\n".join(lines)[:700]
+    # 先完整保留原有 Memory/Raw 渲染，再使用剩余预算；邻居不进入候选/重排。
+    anchors = list(result['archive'])
+    seen_raw.update(item['id'] for item in anchors)
+    for anchor in anchors:
+        if len(result['rendered']) >= 700:
+            break
+        for direction, row, role in archive_context(archive, app_id, channel, anchor):
+            source_key = (agent_id, app_id, channel, row['source_event_id'], row['version'])
+            text = normalized(row['text'] or '')
+            if (row['deleted'] or row['role'] not in {'user', 'assistant'} or not text
+                    or source_key in suppressed_raw or row['source_event_id'] in seen_raw
+                    or any(text in t or t in text for t in texts)):
+                continue
+            line = (f"[原话 {anchor['id']} ({role}) 的{direction} "
+                    f"{row['source_event_id']} v{row['version']} ({row['role']})] {row['text']}")
+            if len(result['rendered']) + 1 + len(line) > 700:
+                continue
+            result['rendered'] += '\n' + line
+            result['archive'].append(dict(kind='archive', id=row['source_event_id'],
+                                          version=row['version'], text=row['text']))
+            seen_raw.add(row['source_event_id'])
+            texts.append(text)
     return result

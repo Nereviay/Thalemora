@@ -76,6 +76,86 @@ class RecallTests(unittest.TestCase):
             self.assertEqual(self.recall(visible_texts=["我喜欢乌龙茶", "上次买的乌龙茶来自合成茶店"])["rendered"], "")
             self.assertEqual(self.app.providers.audit(), [])
 
+    def test_archive_neighbors_roles_and_visible_suppression(self):
+        for event_id, text in (("before", "先把杯子摆好"), ("anchor", "我喜欢乌龙茶"),
+                               ("after", "好的我去烧水")):
+            self.insert(event_id, text)
+        with closing(sqlite3.connect(self.app.archive(self.agent, "demo", "main").path)) as db, db:
+            for event_id, role, minute in (("before", "assistant", "00"),
+                                            ("anchor", "user", "01"), ("after", "assistant", "02")):
+                db.execute("UPDATE history_events SET epoch_id='epoch', role=?, occurred_at=? "
+                           "WHERE source_event_id=?", (role, f"2026-10-16T01:{minute}:00Z", event_id))
+        result = self.recall()
+        self.assertEqual([item["id"] for item in result["archive"]], ["anchor", "before", "after"])
+        self.assertIn("[历史原话 anchor] 我喜欢乌龙茶", result["rendered"])
+        self.assertIn("[原话 anchor (user) 的前文 before v1 (assistant)]", result["rendered"])
+        self.assertIn("[原话 anchor (user) 的后文 after v1 (assistant)]", result["rendered"])
+        hidden = self.recall(visible_archive_ids=["before"], visible_texts=["好的我去烧水"])
+        self.assertEqual([item["id"] for item in hidden["archive"]], ["anchor"])
+        self.assertNotIn("先把杯子摆好", hidden["rendered"])
+        self.assertNotIn("好的我去烧水", hidden["rendered"])
+        self.assertEqual(self.recall(visible_archive_ids=["anchor"])["rendered"], "")
+
+    def test_archive_neighbor_boundaries_and_tombstone_position(self):
+        for event_id, text in (("far", "更早的位置"), ("before", "先把杯子摆好"),
+                               ("anchor", "我喜欢乌龙茶"), ("after", "好的我去烧水")):
+            self.insert(event_id, text)
+        path = self.app.archive(self.agent, "demo", "main").path
+        # 每次恢复同一组合成窗口，只改变边界条件。
+        for boundary in ("conversation", "epoch", "deleted", "duplicate", "empty"):
+            with self.subTest(boundary=boundary):
+                with closing(sqlite3.connect(path)) as db, db:
+                    for event_id, minute in (("far", "00"), ("before", "01"),
+                                              ("anchor", "02"), ("after", "03")):
+                        db.execute("UPDATE history_events SET conversation_id='synthetic', epoch_id='epoch', "
+                                   "deleted=0, text=?, occurred_at=? WHERE source_event_id=?",
+                                   ({"far": "更早的位置", "before": "先把杯子摆好",
+                                     "anchor": "我喜欢乌龙茶", "after": "好的我去烧水"}[event_id],
+                                    f"2026-10-16T01:{minute}:00Z", event_id))
+                    if boundary == "conversation":
+                        db.execute("UPDATE history_events SET conversation_id='other' WHERE source_event_id!='anchor'")
+                    elif boundary == "epoch":
+                        db.execute("UPDATE history_events SET epoch_id='other' WHERE source_event_id!='anchor'")
+                    elif boundary == "deleted":
+                        db.execute("UPDATE history_events SET deleted=1, text=NULL "
+                                   "WHERE source_event_id IN ('before','after')")
+                    elif boundary == "duplicate":
+                        db.execute("UPDATE history_events SET occurred_at='2026-10-16T01:02:00Z' "
+                                   "WHERE source_event_id='before'")
+                    else:
+                        db.execute("UPDATE history_events SET epoch_id='' ")
+                result = self.recall()
+                self.assertEqual([item["id"] for item in result["archive"]], ["anchor"])
+                self.assertIn("我喜欢乌龙茶", result["rendered"])
+
+    def test_archive_neighbor_time_gap_and_render_budget(self):
+        for event_id, text in (("before", "先把杯子摆好"), ("anchor", "我喜欢乌龙茶"),
+                               ("after", "好的我去烧水")):
+            self.insert(event_id, text)
+        path = self.app.archive(self.agent, "demo", "main").path
+        with closing(sqlite3.connect(path)) as db, db:
+            for event_id, instant in (("before", "2026-10-15T23:59:00Z"),
+                                       ("anchor", "2026-10-16T01:00:00Z"),
+                                       ("after", "2026-10-16T01:30:00Z")):
+                db.execute("UPDATE history_events SET epoch_id='epoch', occurred_at=? "
+                           "WHERE source_event_id=?", (instant, event_id))
+        result = self.recall()
+        self.assertEqual([item["id"] for item in result["archive"]], ["anchor", "after"])
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("UPDATE history_events SET occurred_at='2026-10-16T01:30:01Z' "
+                       "WHERE source_event_id='after'")
+        self.assertEqual([item["id"] for item in self.recall()["archive"]], ["anchor"])
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("UPDATE history_events SET occurred_at='2026-10-16T00:59:00Z', text=? "
+                       "WHERE source_event_id='before'", ("杯" * 400,))
+            db.execute("UPDATE history_events SET occurred_at='2026-10-16T01:01:00Z', text=? "
+                       "WHERE source_event_id='after'", ("水" * 400,))
+        result = self.recall()
+        self.assertLessEqual(len(result["rendered"]), 700)
+        self.assertEqual([item["id"] for item in result["archive"]], ["anchor", "before"])
+        self.assertIn("杯" * 400, result["rendered"])
+        self.assertNotIn("水" * 400, result["rendered"])
+
     def test_revision_refresh_tombstone_and_lineage(self):
         card = self.card("home", "我住甲城")
         self.assertIn("甲城", self.recall("我现在住哪？")["rendered"])

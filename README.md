@@ -7,7 +7,7 @@
 洄海（Thalemora）是一套**独立、开源、可自行部署的 AI 长期记忆系统**。<br>
 保存聊天原话，整理值得记住的事情，让已连接的聊天应用在需要时找回相关经历。
 
-[开始使用](docs/GETTING_STARTED.md) · [安装插件](docs/PLUGIN_SETUP.md) · [下载 v0.8.0](https://github.com/Nereviay/Thalemora/releases/tag/v0.8.0) · [使用文档](docs/README.md)
+[开始使用](docs/GETTING_STARTED.md) · [安装插件](docs/PLUGIN_SETUP.md) · [下载 v0.8.1](https://github.com/Nereviay/Thalemora/releases/tag/v0.8.1) · [使用文档](docs/README.md)
 
 </div>
 
@@ -65,7 +65,7 @@
 需要 Python 3.10 或更新版本。
 
 ```bash
-git clone --depth 1 --branch v0.8.0 https://github.com/Nereviay/Thalemora.git
+git clone --depth 1 --branch v0.8.1 https://github.com/Nereviay/Thalemora.git
 cd Thalemora
 python3 -m venv .venv
 ./.venv/bin/python -m pip install -c requirements.lock .
