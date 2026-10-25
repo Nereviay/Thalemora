@@ -12,6 +12,7 @@ from unittest.mock import patch
 from thalemora.app import Application
 from thalemora.app.providers import ProviderUnavailable
 from thalemora.identity import AccessDenied
+from thalemora.retrieval.recall import prior_assistant_query
 
 
 class Embedder:
@@ -55,6 +56,309 @@ class RecallTests(unittest.TestCase):
 
     def recall(self, query="以前喜欢什么茶？", **kwargs):
         return self.app.recall_for_turn(self.agent, "demo", query, **kwargs)
+
+    def test_m07_true_user_quote_without_models_or_memory_merge(self):
+        self.card('summary', '我喜欢合成红茶')
+        self.insert('quote', '我和那个朋友认识十年，仍然常聊合成天文。')
+        query = '我当时原话怎么说，关于“认识十年”的那个朋友？'
+        with patch('thalemora.retrieval.recall.configured_model', side_effect=AssertionError('no model')):
+            result = self.recall(query)
+        self.assertEqual(result['memories'], [])
+        self.assertEqual(result['archive'][0]['id'], 'quote')
+        self.assertEqual(result['archive'][0]['version'], 1)
+        self.assertEqual(result['archive'][0]['role'], 'user')
+        self.assertIn('2026-10-16T01:00:00Z', result['rendered'])
+        self.assertIn('用户原话', result['rendered'])
+        self.assertLessEqual(len(result['rendered']), 700)
+        self.assertEqual(len(result['archive']), 1)  # 缺 epoch 不补邻居
+        self.assertNotIn('用户原话', self.recall(query, visible_archive_ids=['quote'])['rendered'])
+        self.assertNotIn('用户原话', self.recall(query, visible_texts=[result['archive'][0]['text']])['rendered'])
+
+    def test_m07_month_people_role_and_missing_evidence(self):
+        event = self.event('plural', '我和朋友们认识十年了')
+        self.app.import_history(self.agent, 'demo', [event])
+        event = self.event('assistant', '我和朋友认识十年了')
+        event['role'] = 'assistant'
+        self.app.import_history(self.agent, 'demo', [event])
+        query = '我七月当时原话怎么说，关于“认识十年”的朋友？'
+        self.assertNotIn('用户原话', self.recall(query)['rendered'])
+        event = self.event('july', '我和朋友认识十年了')
+        event['occurred_at'] = '2026-07-16T01:00:00Z'
+        self.app.import_history(self.agent, 'demo', [event])
+        result = self.recall(query)
+        self.assertEqual(result['archive'][0]['id'], 'july')
+        self.assertNotIn('用户原话', self.recall(query.replace('七月', '八月'))['rendered'])
+        self.assertNotIn('用户原话', self.recall(query.replace('七月', '上个月'))['rendered'])
+        self.assertNotIn('用户原话', self.recall('我当时原话怎么说？')['rendered'])
+        self.assertNotIn('用户原话', self.recall('我当时原话怎么说，“不存在的锚点”？')['rendered'])
+
+    def test_m07_rechecks_canonical_revision_after_search(self):
+        self.insert('quote', '我和朋友认识十年了')
+        search = self.app.search
+        def changed(*args, **kwargs):
+            hits = search(*args, **kwargs)
+            self.insert('quote', '更正后的合成记录', version=2)
+            return hits
+        with patch.object(self.app, 'search', side_effect=changed):
+            result = self.recall('我当时原话怎么说，“认识十年”？')
+        self.assertNotIn('用户原话', result['rendered'])
+        self.assertNotIn('我和朋友认识十年了', result['rendered'])
+
+    def test_m07_update_delete_and_memory_summary_not_quote(self):
+        self.insert('quote', '我提过合成紫砂茶壶很漂亮')
+        query = '我那时提过合成紫砂茶壶什么？'
+        self.assertIn('用户原话', self.recall(query)['rendered'])
+        self.insert('quote', '我已改口只喜欢玻璃杯', version=2)
+        result = self.recall(query)
+        self.assertNotIn('用户原话', result['rendered'])
+        self.assertNotIn('紫砂茶壶很漂亮', result['rendered'])
+        self.insert('quote', '我提过合成紫砂茶壶很漂亮', version=3)
+        self.insert('quote', '', version=4, deleted=True)
+        self.assertNotIn('用户原话', self.recall(query)['rendered'])
+        card = self.card('summary', '合成记录仅说明喜欢茶具')
+        self.app.revise_memory(self.agent, 'demo', card['card_id'],
+                               '合成紫砂茶壶是用户偏好', card['current_revision_id'])
+        self.assertNotIn('用户原话', self.recall(query)['rendered'])
+
+    def prior_context(self):
+        text = "1、茉莉花茶\n2、乌龙茶"
+        event = self.event("prior", text)
+        event.update(role="assistant", epoch_id="epoch")
+        self.app.import_history(self.agent, "demo", [event])
+        return dict(conversation_id="synthetic", current_epoch_id="epoch",
+                    previous_assistant_ref=dict(agent_id=self.agent, app_id="demo", channel="main",
+                                                source_event_id="prior", version=1, text=text))
+
+    def keyword_card(self, event_id, keyword, **kwargs):
+        card = self.card(event_id, '合成证据只描述一次远足', **kwargs)
+        path = self.app.memory_path(kwargs.get('agent', self.agent),
+                                    kwargs.get('app_id', 'demo'), kwargs.get('channel', 'main'))
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute('UPDATE cards SET keywords=? WHERE id=?',
+                       (json.dumps([keyword], ensure_ascii=False), card['card_id']))
+        return card
+
+    def test_exact_short_keyword_unique_and_current_without_extra_models(self):
+        card = self.keyword_card('walk', '星野')
+        self.recall('星野')  # 预热相同修订
+        with patch('thalemora.retrieval.recall.RetrievalIndex._replace_lane',
+                   side_effect=AssertionError('不得重建')), \
+                patch('thalemora.retrieval.recall.configured_model', return_value=('disabled', None)) as model:
+            result = self.recall('星野')
+        self.assertEqual([m['id'] for m in result['memories']], [card['card_id']])
+        self.assertEqual(result['memories'][0]['revision_id'], card['current_revision_id'])
+        self.assertEqual([c.args[1] for c in model.call_args_list], ['embedding'])
+        self.assertLessEqual(len(result['rendered']), 700)
+        self.insert('walk', '来源已更新', version=2)
+        self.assertEqual(self.recall('星野')['rendered'], '')
+
+    def test_exact_short_keyword_duplicate_or_partial_is_not_unique(self):
+        first = self.keyword_card('a', '星野')
+        self.keyword_card('b', '星野')
+        self.assertEqual(self.recall('星野')['rendered'], '')
+        self.assertEqual(self.recall('星野', visible_memory_ids=[first['card_id']])['rendered'], '')
+        self.keyword_card('partial', '月岚祭')
+        self.assertEqual(self.recall('月岚')['rendered'], '')
+
+    def test_exact_short_keyword_generic_and_seen_are_excluded(self):
+        card = self.keyword_card('walk', '星野')
+        for visible in (dict(visible_memory_ids=[card['card_id']]),
+                        dict(visible_archive_ids=['walk']),
+                        dict(visible_texts=['合成证据只描述一次远足'])):
+            self.assertEqual(self.recall('星野', **visible)['rendered'], '')
+        self.keyword_card('generic', '朋友')
+        self.assertEqual(self.recall('朋友')['rendered'], '')
+        self.assertEqual(self.recall('星 野')['rendered'], '')
+
+    def test_exact_short_keyword_agent_source_isolation_and_normal_hit(self):
+        self.keyword_card('other', '星野', agent=self.other)
+        self.app.grant_source(self.agent, 'elsewhere')
+        self.keyword_card('private', '星野', app_id='elsewhere')
+        self.assertEqual(self.recall('星野')['rendered'], '')
+        card = self.keyword_card('local', '星野')
+        self.assertEqual([m['id'] for m in self.recall('星野')['memories']], [card['card_id']])
+        self.insert('raw', '星野是当前原话中的名字')
+        result = self.recall('星野')
+        self.assertEqual(result['memories'], [])
+        self.assertEqual(result['archive'][0]['id'], 'raw')
+        with self.assertRaises(AccessDenied):
+            self.app.recall_for_turn(self.other, 'elsewhere', '星野')
+
+    def test_two_facts_keep_independent_sources_and_old_limit(self):
+        first = self.card('old', '合成旅行以前选择甲城')
+        second = self.card('new', '合成旅行后来选择乙城')
+        self.card('unrelated', '我喜欢红茶')
+        result = self.recall('合成旅行前后变化两件事？')
+        self.assertEqual({m['id'] for m in result['memories']},
+                         {first['card_id'], second['card_id']})
+        self.assertIn('独立来源未合并', result['rendered'])
+        self.assertIn('关联与冲突均未据此判定', result['rendered'])
+        self.assertLessEqual(len(result['rendered']), 700)
+        self.assertEqual(len(self.recall('合成旅行')['memories']), 1)
+        self.assertEqual(len(self.recall('合成旅行前后变化',
+                                        visible_memory_ids=[first['card_id']])['memories']), 1)
+        self.assertEqual(len(self.recall('合成旅行两件事',
+                                        visible_archive_ids=['old'])['memories']), 1)
+
+    def test_two_facts_recheck_revision_after_single_rerank(self):
+        self.card('old', '合成旅行以前选择甲城')
+        second = self.card('new', '合成旅行后来选择乙城')
+        calls = []
+        def rerank(query, docs):
+            calls.append(query)
+            self.insert('new', '合成旅行来源已更正', version=2)
+            return [1.] * len(docs)
+        self.app.providers.local_models['rerank'] = ('fake', rerank)
+        self.app.providers.configure('rerank', mode='local', model='fake')
+        result = self.recall('合成旅行前后变化')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(result['memories']), 1)
+        self.assertNotIn(second['card_id'], [m['id'] for m in result['memories']])
+
+    def test_temporal_hint_only_recorded_date_current_revision_and_budget(self):
+        card = self.card('trip', '合成旅行选择甲城')
+        path = self.app.memory_path(self.agent, 'demo', 'main')
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute('UPDATE cards SET happened_at=? WHERE id=?',
+                       ('2020-03-04', card['card_id']))
+            db.execute('UPDATE card_revisions SET happened_at=? WHERE id=?',
+                       ('2020-03-04', card['current_revision_id']))
+        result = self.recall('合成旅行以前？')
+        self.assertIn('事件日期：2020-03-04（不代表现状）', result['rendered'])
+        self.assertIn(f"修订 {card['current_revision_id']}", result['rendered'])
+        self.assertNotIn('事件日期', self.recall('合成旅行')['rendered'])
+        self.assertNotIn('本卡有修订', result['rendered'])
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute('UPDATE cards SET happened_at=NULL WHERE id=?', (card['card_id'],))
+        self.assertNotIn('事件日期', self.recall('合成旅行后来修改？')['rendered'])
+        self.assertLessEqual(len(result['rendered']), 700)
+        self.app.revise_memory(self.agent, 'demo', card['card_id'],
+                               '合成旅行选择乙城', card['current_revision_id'])
+        result = self.recall('合成旅行以前后来修改？')
+        self.assertEqual(len(result['memories']), 1)
+        self.assertNotEqual(result['memories'][0]['revision_id'], card['current_revision_id'])
+        self.assertIn('乙城', result['rendered'])
+        self.assertNotIn('甲城', result['rendered'])
+        self.assertNotIn('本卡有修订', result['rendered'])
+        self.assertNotIn('事件日期', result['rendered'])
+
+    def test_two_facts_budget_keeps_original_selection(self):
+        self.card('a', '合成旅行甲城' + '山' * 310)
+        self.card('b', '合成旅行乙城' + '海' * 310)
+        self.insert('raw', '合成旅行原话' + '水' * 310)
+        base = self.recall('合成旅行')
+        result = self.recall('合成旅行两件事')
+        self.assertEqual([m['id'] for m in result['memories']], [m['id'] for m in base['memories']])
+        self.assertLessEqual(len(result['rendered']), 700)
+
+    def test_short_reference_uses_verified_prior_without_extra_model_calls(self):
+        tea = self.card("tea", "我喜欢乌龙茶，通常周末冲泡")
+        self.card("flower", "我喜欢茉莉花茶，在春天购买")
+        context = self.prior_context()
+        embedder = Embedder()
+        # 正交向量使不相关 Memory 无法靠合成高余弦闯过原有门槛。
+        embedder.encode_one = lambda text: ([1., 0.] if "乌龙茶" in text else [0., 1.])
+        self.app.providers.local_models["embedding"] = ("fake", embedder)
+        self.app.providers.configure("embedding", mode="local", model="fake")
+        calls = []
+        def rerank(query, docs):
+            calls.append((query, docs))
+            return [1.] * len(docs)
+        self.app.providers.local_models["rerank"] = ("fake", rerank)
+        self.app.providers.configure("rerank", mode="local", model="fake")
+        with patch("thalemora.app.providers.urlopen", side_effect=AssertionError("禁止联网")), \
+                patch.object(embedder, "encode_one", wraps=embedder.encode_one) as encode:
+            self.recall("乌龙茶")  # 预热已有索引
+            calls.clear()
+            encode.reset_mock()
+            result = self.recall("第二个呢？", host_context=context)
+            self.assertEqual(encode.call_count, 1)
+            self.assertEqual(len(calls), 1)
+        self.assertEqual([m['id'] for m in result['memories']], [tea['card_id']])
+        self.assertEqual(result['archive'], [])
+        self.assertNotIn("茉莉", result['rendered'])
+        self.assertLessEqual(len(result['rendered']), 700)
+
+    def test_short_reference_missing_prior_and_existing_recall_unchanged(self):
+        self.card("tea", "我喜欢乌龙茶，通常周末冲泡")
+        before = self.recall("乌龙茶")
+        context = self.prior_context()
+        self.assertEqual(self.recall("第二个呢？")['rendered'], "")
+        self.assertEqual(self.recall("第二个呢？", host_context={}), self.recall("第二个呢？"))
+        self.assertEqual(self.recall("乌龙茶", host_context=context), before)
+
+    def test_short_reference_seen_memory_raw_and_prior_are_not_candidates(self):
+        tea = self.card("tea", "我喜欢乌龙茶，通常周末冲泡")
+        self.insert("raw", "上次的乌龙茶来自合成店铺")
+        context = self.prior_context()
+        result = self.recall("第二个呢？", host_context=context,
+                             visible_memory_ids=[tea['card_id']], visible_archive_ids=["raw"])
+        self.assertEqual(result['rendered'], "")
+        self.assertEqual(self.recall("第二个呢？", host_context=context,
+                                    visible_texts=["我喜欢乌龙茶，通常周末冲泡", "上次的乌龙茶来自合成店铺"])
+                         ['rendered'], "")
+
+    def test_short_reference_rejects_wrong_identity_window_version_or_text(self):
+        self.card("tea", "我喜欢乌龙茶，通常周末冲泡")
+        context = self.prior_context()
+        baseline = self.recall("第二个呢？")
+        for field, value in (("agent_id", self.other), ("app_id", "elsewhere"),
+                             ("channel", "private"), ("version", 2), ("text", "猜测的乌龙茶")):
+            with self.subTest(field=field):
+                invalid = dict(context, previous_assistant_ref=dict(context['previous_assistant_ref'], **{field: value}))
+                self.assertEqual(self.recall("第二个呢？", host_context=invalid), baseline)
+        for field in ('conversation_id', 'current_epoch_id'):
+            self.assertEqual(self.recall("第二个呢？", host_context=dict(context, **{field: 'other'})), baseline)
+        path = self.app.archive(self.agent, "demo", "main").path
+        for update in ("epoch_id=NULL", "epoch_id=''", "epoch_id='other'", "role='user'",
+                       "deleted=1, text=NULL"):
+            with self.subTest(update=update):
+                with closing(sqlite3.connect(path)) as db, db:
+                    db.execute(f"UPDATE history_events SET {update} WHERE source_event_id='prior'")
+                self.assertEqual(self.recall("第二个呢？", host_context=context), baseline)
+
+    def test_short_reference_seen_quote_does_not_become_new_memory(self):
+        context = self.prior_context()
+        self.assertEqual(self.recall("第二个呢？", host_context=context)['rendered'], "")
+        self.card("tea", "乌龙茶")
+        self.assertEqual(self.recall("第二个呢？", host_context=context)['rendered'], "")
+
+    def test_short_reference_prior_invalidated_during_rerank(self):
+        self.card("tea", "我喜欢乌龙茶，通常周末冲泡")
+        context = self.prior_context()
+        def rerank(query, docs):
+            event = self.event("prior", "更正后的上一答", version=2)
+            event.update(role="assistant", epoch_id="epoch")
+            self.app.import_history(self.agent, "demo", [event])
+            return [1.] * len(docs)
+        self.app.providers.local_models['rerank'] = ('fake', rerank)
+        self.app.providers.configure('rerank', mode='local', model='fake')
+        result = self.recall("第二个呢？", host_context=context)
+        self.assertEqual(result['rendered'], "")
+        self.assertEqual(result['memories'], [])
+        self.assertEqual(result['archive'], [])
+
+    def test_prior_options_denial_uses_topic_not_denied_choices(self):
+        card = self.card("game", "我平常玩合成丙游戏")
+        context = self.prior_context()
+        event = self.event("prior", "你玩合成甲游戏还是合成乙游戏？", version=2)
+        event.update(role='assistant', epoch_id='epoch')
+        self.app.import_history(self.agent, "demo", [event])
+        context['previous_assistant_ref'].update(version=2, text=event['text'])
+        result = self.recall("我没玩过那两个游戏", host_context=context)
+        self.assertEqual([m['id'] for m in result['memories']], [card['card_id']])
+        self.assertNotIn("合成甲", result['rendered'])
+        self.assertEqual(result['archive'], [])
+
+    def test_short_reference_pure_decision_is_conservative(self):
+        prior = "1、茉莉花茶\n2、乌龙茶"
+        self.assertEqual(prior_assistant_query("第二个呢？", prior), "乌龙茶")
+        for query, text in (("那个呢？", prior), ("第三个呢？", prior),
+                            ("第二个呢？", "茉莉花茶或者乌龙茶"),
+                            ("第二个呢？", "1、甲\n2、乙\n2、丙")):
+            self.assertEqual(prior_assistant_query(query, text), query)
+        self.assertEqual(prior_assistant_query("我没玩过那两个游戏", "你玩甲游戏还是乙游戏？"), "我平常玩什么游戏？")
+        self.assertEqual(prior_assistant_query("我没玩过那两个游戏", "猜测的上文"), "我没玩过那两个游戏")
 
     def test_lexical_related_unrelated_low_information_and_visible(self):
         card = self.card("tea", "我喜欢乌龙茶")
