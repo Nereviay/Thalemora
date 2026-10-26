@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import re
 import os
 import numbers
 import sqlite3
@@ -463,6 +464,86 @@ class RetrievalIndex:
                 },
             })
         return out
+
+    def stored_related_candidates(self, primary, rows):
+        """兼容已有的 M05 关联边；只认当前授权来源/当前修订，不产生或补造边。"""
+        current = {row['source_id']: row for row in rows
+                   if 'extension_id' not in row['provenance']
+                   and row['status'] not in {'trashed', 'archived', 'retired'}}
+        source = current.get(primary['id'])
+        if (source is None or source['source_key'] != primary['source_key']
+                or source['text'] != primary['text']
+                or source['provenance']['revision_id'] != primary['revision_id']):
+            return []
+        with self._connect() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_related_edges'").fetchone():
+                return []
+            edges = db.execute(
+                "SELECT card_a_id,revision_a_id,card_b_id,revision_b_id,"
+                "shared_keywords_json,reason FROM memory_related_edges "
+                "WHERE relation='related' AND policy_version=? "
+                "AND (card_a_id=? OR card_b_id=?) ORDER BY weight DESC LIMIT 12",
+                ('memory_related_graph:v1', primary['id'], primary['id'])).fetchall()
+        result = []
+        for edge in edges:
+            forward = edge['card_a_id'] == primary['id']
+            source_rev = edge['revision_a_id'] if forward else edge['revision_b_id']
+            target_id = edge['card_b_id'] if forward else edge['card_a_id']
+            target_rev = edge['revision_b_id'] if forward else edge['revision_a_id']
+            row = current.get(target_id)
+            if (source_rev != primary['revision_id'] or row is None
+                    or row['provenance']['revision_id'] != target_rev):
+                continue
+            try:
+                shared = json.loads(edge['shared_keywords_json'])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(shared, list) or not all(isinstance(k, str) for k in shared):
+                continue
+            result.append((row, dict(
+                kind='stored_graph', relation='related_unverified',
+                policy_version='memory_related_graph:v1', shared_keywords=shared,
+                card_a_id=primary['id'], revision_a_id=source_rev,
+                card_b_id=target_id, revision_b_id=target_rev,
+                reason=edge['reason'])))
+            if len(result) >= 3:
+                break
+        return result
+
+    @staticmethod
+    def derived_related_candidates(primary, rows, *, excluded_keywords=()):
+        """仅接收调用方已核验的同范围当前行；纯读取，不保存或冒充正式关联图。"""
+        def keywords(row):
+            value = row['provenance'].get('keywords') or '[]'
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    # 现役 Memory 关键词字段为逗号分隔文本，非 JSON。
+                    value = re.split(r'[,，、;；\s]+', value)
+            if not isinstance(value, list):
+                return set()
+            return {k.strip() for k in value if isinstance(k, str) and len(k.strip()) >= 2
+                    and k.strip() not in excluded_keywords and k.strip().lower() in row['text'].lower()}
+
+        current = {row['source_key']: row for row in rows
+                   if 'extension_id' not in row['provenance']
+                   and row['status'] not in {'trashed', 'archived', 'retired'}}
+        first = current.get(primary['source_key'])
+        if (first is None or first['provenance']['revision_id'] != primary['revision_id']
+                or first['text'] != primary['text']):
+            return []
+        shared = keywords(first)
+        candidates = []
+        for row in current.values():
+            overlap = sorted(shared & keywords(row))
+            if row['source_id'] != primary['id'] and len(overlap) >= 2:
+                candidates.append((row, dict(
+                    kind='derived_candidate', relation='related_unverified',
+                    policy_version='derived_shared_keywords:v1', shared_keywords=overlap,
+                    card_a_id=primary['id'], revision_a_id=primary['revision_id'],
+                    card_b_id=row['source_id'], revision_b_id=row['provenance']['revision_id'])))
+        return candidates
 
     def refresh_memory_card(self, card_id: int, *, embedder=None) -> dict:
         """Atomically replace this card's canonical and extension units."""

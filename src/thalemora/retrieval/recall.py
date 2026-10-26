@@ -30,6 +30,47 @@ def normalized(text):
     return re.sub(r"\W+", "", text.lower())
 
 
+def birthday_month(text):
+    """只接受完整的具名生日月份陈述，不推断代词或转述。"""
+    match = re.fullmatch(
+        r'(?:我之前记错了[，,。]?\s*)?([\u4e00-\u9fff]{2,4})的生日是'
+        r'(1[0-2]|[1-9]|十一|十二|[一二三四五六七八九十])月[。！!]?', text.strip())
+    if not match:
+        return None
+    name, month = match.groups()
+    if re.search(r'假设|如果|据说|听说|曾经|以前|之前|比如|例如|原来', name):
+        return None
+    if name in {'我的', '你的', '他的', '她的', '朋友', '同事', '妈妈', '爸爸', '姐姐', '哥哥'}:
+        return None
+    months = dict(zip('一二三四五六七八九十', range(1, 11)), 十一=11, 十二=12)
+    return name, int(month) if month.isdigit() else months[month]
+
+
+def birthday_conflict(query, rows):
+    claim = birthday_month(query)
+    if claim is None:
+        return None
+    candidates = [row for row in rows
+                  if 'extension_id' not in row['provenance']
+                  and row['status'] not in {'trashed', 'archived', 'retired'}
+                  and re.search(re.escape(claim[0]) + r'的生日', row['text'])]
+    if len(candidates) != 1:
+        return None
+    row = candidates[0]
+    # 正式卡可能带标题；只接受完整、明确的生日陈述正文。
+    old = birthday_month(row['text'].splitlines()[-1].strip())
+    if old is None or old[0] != claim[0] or old[1] == claim[1]:
+        return None
+    line = (f"[记忆事实待核对 Memory {row['source_id']} "
+            f"rev {row['provenance']['revision_id']}] 当前记忆：{row['text']}；"
+            f"用户本轮新说法：{query}。")
+    if query.startswith('我之前记错了'):
+        line += '用户已明确纠正旧说法，须经正式修订流程（06）更新；不自动写入、无需重复询问。'
+    else:
+        line += '待用户确认，不自动更新；请自然询问是否更正。'
+    return line if len(line) <= 700 else None
+
+
 def original_quote_request(query):
     return bool(re.search(r"(?:当时|那时|以前|之前|上次).{0,24}原话|原话.{0,12}(?:怎么说|是什么)|我(?:当时|那时|以前|之前|上次).{0,50}提过.{0,8}(?:什么|啥)", query))
 
@@ -465,6 +506,43 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                 result['memories'].append(item)
                 texts.append(text)
                 break
+    # shortcut: 旧 M05 图尚未迁移；07 再核正式图兼容，这里只派生本请求的关键词候选。
+    if (len(result['memories']) == 1
+            and re.search(r"两(?:个|件|次|条)|前后|分别|比较|对比", query)):
+        primary = result['memories'][0]
+        related = index.stored_related_candidates(primary, current.values())
+        related += index.derived_related_candidates(primary, current.values(),
+                                                    excluded_keywords=generic)
+        for row, relation in related:
+            # 已存边也只是“相关”而非事实合并；至少有本轮文字锚点。
+            if (relation['kind'] == 'stored_graph'
+                    and not any(k in query for k in relation['shared_keywords'])
+                    and not any(t in row['text'].lower() for t in terms)):
+                continue
+            first_refs = refs.get(primary['source_key'], set())
+            second_refs = refs.get(row['source_key'], set())
+            text = normalized(row['text'])
+            if (row['source_id'] in seen_cards or not first_refs or not second_refs
+                    or {r[:4] for r in first_refs} & {r[:4] for r in second_refs}
+                    or any(r[3] in seen_raw for r in second_refs)
+                    or any(text in t or t in text for t in texts)):
+                continue
+            label = ('已记录关联候选' if relation['kind'] == 'stored_graph'
+                     else '共享关键词派生候选（未保存关联图）')
+            line = (f"[{label}：记忆 {primary['id']} "
+                    f"修订 {primary['revision_id']}；记忆 {row['source_id']} "
+                    f"修订 {row['provenance']['revision_id']}] {row['text'][:300]}"
+                    "（两条独立来源；尚未证实关系类型，不推断因果或合并事实）")
+            if len(result['rendered']) + 1 + len(line) > 700:
+                continue
+            relation.update(source_a=sorted(first_refs), source_b=sorted(second_refs))
+            result['memories'].append(dict(
+                kind='memory', id=row['source_id'], source_key=row['source_key'],
+                revision_id=row['provenance']['revision_id'], text=row['text'], score=0.0,
+                related_evidence=relation))
+            result['rendered'] += '\n' + line
+            texts.append(text)
+            break
     if re.search(r"以前|之前|后来|修改|改过|更正|纠正|前后|变化", query):
         from thalemora.lifecycle.temporal import temporal_context_hint
         for item in result['memories']:
@@ -498,4 +576,19 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                                           version=row['version'], text=row['text']))
             seen_raw.add(row['source_event_id'])
             texts.append(text)
+    if birthday_month(query) is not None:
+        latest, latest_refs, _ = scoped_rows(path, app_id, channel, archive.path, agent_id)
+        # 唯一性先按完整授权范围判断，不能通过可见过滤制造唯一冲突。
+        hint = birthday_conflict(query, latest)
+        original_texts = [normalized(t) for t in visible_texts if normalized(t)]
+        matching = [r for r in latest if re.search(
+            re.escape(birthday_month(query)[0]) + r'的生日', r['text'])]
+        if hint and matching:
+            row = matching[0]
+            if (row['source_id'] not in set(visible_memory_ids)
+                    and not any(k[3] in set(visible_archive_ids)
+                                for k in latest_refs.get(row['source_key'], ()))
+                    and not any(normalized(row['text']) in t or t in normalized(row['text'])
+                                for t in original_texts)):
+                result['rendered'] = (hint + '\n' + result['rendered']).rstrip()[:700]
     return result

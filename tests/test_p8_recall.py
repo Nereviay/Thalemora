@@ -57,6 +57,60 @@ class RecallTests(unittest.TestCase):
     def recall(self, query="以前喜欢什么茶？", **kwargs):
         return self.app.recall_for_turn(self.agent, "demo", query, **kwargs)
 
+    def test_birthday_conflict_read_only_and_revision(self):
+        card = self.card('birthday', '林小明的生日是8月')
+        path = self.app.memory_path(self.agent, 'demo', 'main')
+        before = path.read_bytes()
+        result = self.recall('林小明的生日是9月')
+        self.assertIn('待用户确认，不自动更新', result['rendered'])
+        self.assertIn(str(card['card_id']), result['rendered'])
+        self.assertIn(str(card['current_revision_id']), result['rendered'])
+        self.assertIn('林小明的生日是9月', result['rendered'])
+        self.assertLessEqual(len(result['rendered']), 700)
+        self.assertEqual(before, path.read_bytes())
+        self.assertEqual(set(result), {'rendered', 'memories', 'archive', 'errors'})
+        self.assertTrue(all('9月' not in m['text'] for m in result['memories']))
+        self.assertIn('正式修订流程（06）', self.recall('我之前记错了，林小明的生日是9月')['rendered'])
+
+    def test_birthday_requires_explicit_current_claim(self):
+        self.card('birthday', '林小明的生日是8月')
+        for query in ('他的生日是9月', '林小明的生日', '林小明的生日是8月',
+                      '王小明的生日是9月', '假设林小明的生日是9月',
+                      '听说林小明的生日是9月', '以前林小明的生日是9月',
+                      '例如林小明的生日是9月', '林小明的生日是9月吗？'):
+            with self.subTest(query=query):
+                self.assertNotIn('待用户确认', self.recall(query)['rendered'])
+
+    def test_birthday_visible_filters_and_ambiguity(self):
+        card = self.card('birthday', '林小明的生日是8月')
+        for kwargs in (dict(visible_memory_ids=[card['card_id']]),
+                       dict(visible_archive_ids=['birthday']),
+                       dict(visible_texts=['林小明的生日是8月'])):
+            self.assertNotIn('待用户确认', self.recall('林小明的生日是9月', **kwargs)['rendered'])
+        self.card('duplicate', '林小明的生日是7月')
+        self.assertNotIn('待用户确认', self.recall('林小明的生日是9月')['rendered'])
+        self.assertNotIn('待用户确认', self.recall(
+            '林小明的生日是9月', visible_memory_ids=[card['card_id']])['rendered'])
+
+    def test_birthday_scope_and_stale_sources(self):
+        self.card('other-person', '林小明的生日是8月', agent=self.other)
+        self.app.grant_source(self.agent, 'demo', channel='private')
+        self.card('other-channel', '林小明的生日是8月', channel='private')
+        self.app.grant_source(self.agent, 'elsewhere')
+        self.card('other-app', '林小明的生日是8月', app_id='elsewhere')
+        self.assertNotIn('待用户确认', self.recall('林小明的生日是9月')['rendered'])
+        self.card('birthday', '林小明的生日是8月')
+        self.insert('birthday', '林小明的生日是7月', version=2)
+        self.assertNotIn('待用户确认', self.recall('林小明的生日是9月')['rendered'])
+        self.insert('birthday', '', version=3, deleted=True)
+        self.assertNotIn('待用户确认', self.recall('林小明的生日是9月')['rendered'])
+
+    def test_birthday_uses_only_current_memory_revision(self):
+        card = self.card('birthday', '林小明的生日是8月')
+        self.app.revise_memory(self.agent, 'demo', card['card_id'],
+                               '林小明的生日是9月', card['current_revision_id'])
+        self.assertNotIn('待用户确认', self.recall('林小明的生日是9月')['rendered'])
+
     def test_m07_true_user_quote_without_models_or_memory_merge(self):
         self.card('summary', '我喜欢合成红茶')
         self.insert('quote', '我和那个朋友认识十年，仍然常聊合成天文。')
@@ -183,6 +237,93 @@ class RecallTests(unittest.TestCase):
         self.assertEqual(result['archive'][0]['id'], 'raw')
         with self.assertRaises(AccessDenied):
             self.app.recall_for_turn(self.other, 'elsewhere', '星野')
+
+    def test_shared_keywords_derived_relation_requires_two_independent_sources(self):
+        first = self.card('old', '合成红茶和合成茶壶：旧计划')
+        second = self.card('new', '合成红茶和合成茶壶：新计划')
+        path = self.app.memory_path(self.agent, 'demo', 'main')
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("UPDATE cards SET keywords=? WHERE id IN (?,?)",
+                       ('合成红茶,合成茶壶', first['card_id'], second['card_id']))
+        result = self.recall('比较合成红茶')
+        self.assertEqual({m['id'] for m in result['memories']},
+                         {first['card_id'], second['card_id']})
+        derived = [m for m in result['memories'] if m.get('related_evidence')]
+        self.assertEqual(len(derived), 1)
+        self.assertEqual(derived[0]['related_evidence']['shared_keywords'],
+                         ['合成红茶', '合成茶壶'])
+        self.assertIn('未保存关联图', result['rendered'])
+        self.assertLessEqual(len(result['rendered']), 700)
+        self.assertEqual(len(self.recall('合成红茶')['memories']), 1)
+        self.assertEqual(len(self.recall(
+            '比较合成红茶', visible_memory_ids=[second['card_id']])['memories']), 1)
+        self.assertEqual(len(self.recall(
+            '比较合成红茶', visible_archive_ids=['new'])['memories']), 1)
+
+        # 只有一个共享关键词，不能把普通检索相似性冒充关联证据。
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("UPDATE cards SET keywords=? WHERE id=?",
+                       ('合成红茶', second['card_id']))
+        self.assertNotIn('未保存关联图', self.recall('比较合成红茶')['rendered'])
+
+    def test_stored_related_graph_checks_current_revision_and_real_sources(self):
+        first = self.card('first', '合成红茶：甲城的方案')
+        second = self.card('second', '合成红茶：乙城的方案')
+        self.assertEqual(len(self.recall('比较合成红茶')['memories']), 1)
+        memory_path = self.app.memory_path(self.agent, 'demo', 'main')
+        with closing(sqlite3.connect(self.app.registry.registry_path)) as db:
+            scope = db.execute(
+                "SELECT rowid FROM sources WHERE agent_id=? AND app_id=? AND channel=?",
+                (self.agent, 'demo', 'main')).fetchone()[0]
+        index_path = memory_path.with_name(f'recall_{scope}.sqlite')
+        with closing(sqlite3.connect(index_path)) as db, db:
+            db.execute('''CREATE TABLE memory_related_edges (
+                card_a_id INTEGER, revision_a_id INTEGER,
+                card_b_id INTEGER, revision_b_id INTEGER,
+                relation TEXT, policy_version TEXT, weight REAL,
+                shared_keywords_json TEXT, reason TEXT)''')
+            db.execute("INSERT INTO memory_related_edges VALUES(?,?,?,?,?,?,?,?,?)",
+                       (first['card_id'], first['current_revision_id'],
+                        second['card_id'], second['current_revision_id'],
+                        'related', 'memory_related_graph:v1', 0.9,
+                        json.dumps(['合成红茶']), 'synthetic'))
+        found = self.recall('比较合成红茶')
+        self.assertEqual({m['id'] for m in found['memories']},
+                         {first['card_id'], second['card_id']})
+        self.assertIn('已记录关联候选', found['rendered'])
+        graph = [m for m in found['memories'] if m.get('related_evidence')]
+        self.assertEqual(len(graph), 1)
+        self.assertEqual(graph[0]['related_evidence']['policy_version'],
+                         'memory_related_graph:v1')
+        self.assertLessEqual(len(found['rendered']), 700)
+        self.assertEqual(len(self.recall(
+            '比较合成红茶', visible_memory_ids=[second['card_id']])['memories']), 1)
+        # 正式修订变动后旧图边版本失效，不能继续关联。
+        self.app.revise_memory(self.agent, 'demo', second['card_id'],
+                               '合成红茶：乙城修改后的方案',
+                               second['current_revision_id'])
+        self.assertNotIn('已记录关联候选', self.recall('比较合成红茶')['rendered'])
+
+    def test_derived_relation_scope_and_stale_revision(self):
+        first = self.card('root', '合成红茶和合成茶壶：主来源')
+        self.app.grant_source(self.agent, 'other-app')
+        self.app.grant_source(self.agent, 'demo', 'private')
+        self.card('other-app', '合成红茶和合成茶壶：其他应用', app_id='other-app')
+        self.card('private', '合成红茶和合成茶壶：私人频道', channel='private')
+        self.card('other-agent', '合成红茶和合成茶壶：其他 Agent', agent=self.other)
+        path = self.app.memory_path(self.agent, 'demo', 'main')
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("UPDATE cards SET keywords=? WHERE id=?",
+                       ('合成红茶,合成茶壶', first['card_id']))
+        self.assertNotIn('未保存关联图', self.recall('比较合成红茶')['rendered'])
+        second = self.card('second', '合成红茶和合成茶壶：补充来源')
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("UPDATE cards SET keywords=? WHERE id=?",
+                       ('合成红茶,合成茶壶', second['card_id']))
+        self.assertIn('未保存关联图', self.recall('比较合成红茶')['rendered'])
+        # 来源失效后，缓存/派生候选绝不能继续带出。
+        self.insert('second', '', version=2, deleted=True)
+        self.assertNotIn('未保存关联图', self.recall('比较合成红茶')['rendered'])
 
     def test_two_facts_keep_independent_sources_and_old_limit(self):
         first = self.card('old', '合成旅行以前选择甲城')
