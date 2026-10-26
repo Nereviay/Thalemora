@@ -6,6 +6,7 @@ import math
 import re
 import sqlite3
 
+from .facts import statement, compare_statement, render_hint
 from .bm25 import tokenize
 from .core import RetrievalIndex
 from .models import configured_model, AvailableEmbedder
@@ -28,47 +29,6 @@ def query_terms(query):
 
 def normalized(text):
     return re.sub(r"\W+", "", text.lower())
-
-
-def birthday_month(text):
-    """只接受完整的具名生日月份陈述，不推断代词或转述。"""
-    match = re.fullmatch(
-        r'(?:我之前记错了[，,。]?\s*)?([\u4e00-\u9fff]{2,4})的生日是'
-        r'(1[0-2]|[1-9]|十一|十二|[一二三四五六七八九十])月[。！!]?', text.strip())
-    if not match:
-        return None
-    name, month = match.groups()
-    if re.search(r'假设|如果|据说|听说|曾经|以前|之前|比如|例如|原来', name):
-        return None
-    if name in {'我的', '你的', '他的', '她的', '朋友', '同事', '妈妈', '爸爸', '姐姐', '哥哥'}:
-        return None
-    months = dict(zip('一二三四五六七八九十', range(1, 11)), 十一=11, 十二=12)
-    return name, int(month) if month.isdigit() else months[month]
-
-
-def birthday_conflict(query, rows):
-    claim = birthday_month(query)
-    if claim is None:
-        return None
-    candidates = [row for row in rows
-                  if 'extension_id' not in row['provenance']
-                  and row['status'] not in {'trashed', 'archived', 'retired'}
-                  and re.search(re.escape(claim[0]) + r'的生日', row['text'])]
-    if len(candidates) != 1:
-        return None
-    row = candidates[0]
-    # 正式卡可能带标题；只接受完整、明确的生日陈述正文。
-    old = birthday_month(row['text'].splitlines()[-1].strip())
-    if old is None or old[0] != claim[0] or old[1] == claim[1]:
-        return None
-    line = (f"[记忆事实待核对 Memory {row['source_id']} "
-            f"rev {row['provenance']['revision_id']}] 当前记忆：{row['text']}；"
-            f"用户本轮新说法：{query}。")
-    if query.startswith('我之前记错了'):
-        line += '用户已明确纠正旧说法，须经正式修订流程（06）更新；不自动写入、无需重复询问。'
-    else:
-        line += '待用户确认，不自动更新；请自然询问是否更正。'
-    return line if len(line) <= 700 else None
 
 
 def original_quote_request(query):
@@ -576,19 +536,21 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                                           version=row['version'], text=row['text']))
             seen_raw.add(row['source_event_id'])
             texts.append(text)
-    if birthday_month(query) is not None:
+    if statement(query) is not None:
         latest, latest_refs, _ = scoped_rows(path, app_id, channel, archive.path, agent_id)
-        # 唯一性先按完整授权范围判断，不能通过可见过滤制造唯一冲突。
-        hint = birthday_conflict(query, latest)
+        hint = compare_statement(query, latest)
         original_texts = [normalized(t) for t in visible_texts if normalized(t)]
-        matching = [r for r in latest if re.search(
-            re.escape(birthday_month(query)[0]) + r'的生日', r['text'])]
-        if hint and matching:
-            row = matching[0]
+        if hint:
+            row = next(r for r in latest if r['source_id'] == hint['id'])
             if (row['source_id'] not in set(visible_memory_ids)
                     and not any(k[3] in set(visible_archive_ids)
                                 for k in latest_refs.get(row['source_key'], ()))
                     and not any(normalized(row['text']) in t or t in normalized(row['text'])
+                                or normalized(hint['old_statement']) in t
                                 for t in original_texts)):
-                result['rendered'] = (hint + '\n' + result['rendered']).rstrip()[:700]
+                line = render_hint(hint)
+                rendered = '\n'.join(filter(None, (result['rendered'], line)))
+                if len(rendered) <= 700:
+                    result['rendered'] = rendered
+                    result['fact_hints'] = [hint]
     return result

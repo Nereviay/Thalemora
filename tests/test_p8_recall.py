@@ -68,7 +68,7 @@ class RecallTests(unittest.TestCase):
         self.assertIn('林小明的生日是9月', result['rendered'])
         self.assertLessEqual(len(result['rendered']), 700)
         self.assertEqual(before, path.read_bytes())
-        self.assertEqual(set(result), {'rendered', 'memories', 'archive', 'errors'})
+        self.assertEqual(set(result), {'rendered', 'memories', 'archive', 'errors', 'fact_hints'})
         self.assertTrue(all('9月' not in m['text'] for m in result['memories']))
         self.assertIn('正式修订流程（06）', self.recall('我之前记错了，林小明的生日是9月')['rendered'])
 
@@ -110,6 +110,71 @@ class RecallTests(unittest.TestCase):
         self.app.revise_memory(self.agent, 'demo', card['card_id'],
                                '林小明的生日是9月', card['current_revision_id'])
         self.assertNotIn('待用户确认', self.recall('林小明的生日是9月')['rendered'])
+
+    def test_generic_fact_domains_and_statuses_without_provider(self):
+        cases = [('place', '我', '居住地', '成都', '重庆'),
+                 ('device', '我', '主要电脑', 'Windows', 'Mac'),
+                 ('job', '小王', '工作', '法务', '开发'),
+                 ('plan', 'Alex Smith', '购买计划', 'mini', 'Air'),
+                 ('unknown', '很长合成名字', '自定义字段', '甲', '乙')]
+        with patch('thalemora.app.providers.urlopen', side_effect=AssertionError('禁止联网')):
+            for event, subject, predicate, old, new in cases:
+                with self.subTest(event=event):
+                    before = f'{subject}的{predicate}是{old}'
+                    after = f'{subject}的{predicate}是{new}'
+                    card = self.card(event, before)
+                    for prefix, status in [('', 'needs_clarification'),
+                                           ('我之前记错了，', 'explicit_correction'),
+                                           ('现在', 'change'), ('已经', 'change'), ('后来', 'change')]:
+                        result = self.recall(prefix + after)
+                        hint = result['fact_hints'][0]
+                        self.assertEqual(hint['status'], status)
+                        self.assertEqual(hint['id'], card['card_id'])
+                        self.assertEqual(hint['revision_id'], card['current_revision_id'])
+                        self.assertEqual(hint['old_statement'], before)
+                        self.assertEqual(hint['new_statement'], prefix + after)
+                        if status == 'explicit_correction':
+                            self.assertIn('无需重复询问', result['rendered'])
+                        if status == 'change':
+                            self.assertIn('不代表旧事实当时错误', result['rendered'])
+                        self.assertLessEqual(len(result['rendered']), 700)
+                    for query in (before, '如果' + after, '别人说' + after,
+                                  '可能' + after, after + '？', after + '吗',
+                                  f'{subject}的其他属性是{new}', f'另一位的{predicate}是{new}'):
+                        self.assertNotIn('fact_hints', self.recall(query))
+            self.assertEqual(self.app.providers.audit(), [])
+
+    def test_generic_exact_sentence_and_conservative_ambiguity(self):
+        from thalemora.retrieval.facts import compare_statement, statement
+        row = dict(source_id='card', status='active',
+                   provenance=dict(revision_id='rev'),
+                   text='合成标题\n我的居住地是成都。\n备注信息')
+        hint = compare_statement('我的居住地是重庆', [row])
+        self.assertEqual(hint['old_statement'], '我的居住地是成都')
+        self.assertEqual(statement('我的居住地现在是重庆')['status'], 'change')
+        self.assertIsNone(compare_statement('我的居住地是重庆', [row, dict(row, source_id='other')]))
+        self.assertIsNone(compare_statement('我的居住地是重庆', [dict(row, text=row['text'] + '\n我的居住地是北京')]))
+        for text in ('我的居住地是成都，如果我的居住地是重庆',
+                     '“我的居住地是成都”', '我的居住地是成都还是重庆？'):
+            self.assertIsNone(statement(text))
+
+    def test_generic_rechecks_source_after_rerank(self):
+        self.card('place', '我的居住地是成都')
+        def rerank(query, docs):
+            self.insert('place', '', version=2, deleted=True)
+            return [1.] * len(docs)
+        self.app.providers.local_models['rerank'] = ('fake', rerank)
+        self.app.providers.configure('rerank', mode='local', model='fake')
+        self.assertNotIn('fact_hints', self.recall('我的居住地是重庆'))
+
+    def test_generic_budget_preserves_existing_recall(self):
+        self.card('place', '我的居住地是' + '成都' * 90)
+        query = '我的居住地是' + '重庆' * 90
+        with patch('thalemora.retrieval.recall.compare_statement', return_value=None):
+            baseline = self.recall(query)
+        result = self.recall(query)
+        self.assertEqual(result, baseline)
+        self.assertLessEqual(len(result['rendered']), 700)
 
     def test_m07_true_user_quote_without_models_or_memory_merge(self):
         self.card('summary', '我喜欢合成红茶')
