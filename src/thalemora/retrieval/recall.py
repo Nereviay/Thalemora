@@ -557,6 +557,46 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                 line = f"[记忆 {item['id']} 修订 {item['revision_id']}] {hint['note']}"
                 if len(result['rendered']) + 1 + len(line) <= 700:
                     result['rendered'] += '\n' + line
+    # 明确追问更正历史时，才按来源有效性补前一版原话；普通问答绝不混入旧事实。
+    if re.search(r"旧版本|旧记录|旧记忆|原话|(?:以前|之前|原来).*(?:说|什么|怎么|哪|几|是)|更正.*(?:经过|过程|历史)", query):
+        for item in result['memories'][:1]:
+            if item.get('kind') != 'memory' or 'extension_id' in item:
+                continue
+            with closing(sqlite3.connect(path)) as db:
+                db.row_factory = sqlite3.Row
+                old = db.execute(
+                    "SELECT r.id,r.content FROM card_revisions r JOIN cards c ON c.id=r.card_id "
+                    "JOIN card_revisions current ON current.id=c.current_revision_id "
+                    "WHERE c.id=? AND c.current_revision_id=? AND r.revision_no<current.revision_no "
+                    "AND r.content!=current.content ORDER BY r.revision_no DESC LIMIT 1",
+                    (item['id'], item['revision_id'])).fetchone()
+            if old is None:
+                continue
+            # 旧修订不是另一条现役事实；仅当其原文来源仍存在且同域授权时展示。
+            old_evidence = next((e for e in application.evidence(
+                agent_id, app_id, item['id'], channel=channel, limit=100)
+                if e.get('revision_id') == old['id']
+                and e.get('resolution') == 'current'
+                and e.get('current_source_text')), None)
+            if old_evidence is None:
+                continue
+            try:
+                old_ref = json.loads(old_evidence['source_ref'])
+            except (ValueError, TypeError):
+                continue
+            source_id = old_ref.get('source_event_id') if isinstance(old_ref, dict) else None
+            if not source_id or source_id in seen_raw:
+                continue
+            quote = old_evidence['current_source_text']
+            line = (f"[记忆 {item['id']} 历史修订 {old['id']}（已被更正，不代表当前事实；"
+                    f"旧原话 {source_id} v{old_ref.get('version')}）] "
+                    f"旧记录：{old['content'][:120]}；当时原话：{quote[:160]}")
+            if len(result['rendered']) + 1 + len(line) <= 700:
+                result['rendered'] += '\n' + line
+                result.setdefault('history_revisions', []).append(dict(
+                    card_id=item['id'], revision_id=old['id'],
+                    source_event_id=source_id, source_version=old_ref.get('version')))
+                break
     # 先完整保留原有 Memory/Raw 渲染，再使用剩余预算；邻居不进入候选/重排。
     anchors = list(result['archive'])
     seen_raw.update(item['id'] for item in anchors)
