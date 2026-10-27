@@ -7,6 +7,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 import fcntl
 import json
+import math
 import sqlite3
 
 from thalemora.gatekeeper import core as gate, ops
@@ -48,6 +49,9 @@ def setup(application, agent_id, app_id, channel):
                 status TEXT NOT NULL,synthetic INTEGER NOT NULL CHECK(synthetic IN (0,1)),
                 usage TEXT,output TEXT,actual_tokens INTEGER,error TEXT,provider_call_id INTEGER,
                 created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS maintenance_reflection_signals(
+                candidate_id TEXT PRIMARY KEY,card_id INTEGER NOT NULL,
+                current_revision_id INTEGER NOT NULL,affinity REAL,bias REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS maintenance_reflections(
                 candidate_id TEXT PRIMARY KEY,card_id INTEGER NOT NULL,revision_id INTEGER NOT NULL,
                 text TEXT,status TEXT NOT NULL,error TEXT,item_id TEXT);
@@ -198,6 +202,63 @@ def commit(application, archive, memory_path, sources, app_id, channel, candidat
         return result
 
 
+def reflection_biases(application, agent_id, app_id, channel="main"):
+    """只读返回 {card_id: {affinity?, bias}}；宿主将 bias 传为 reflective_bias。
+
+    缺省字段不补造；返回时复核归属和当前修订，宿主使用前仍须核验候选。
+    """
+    from thalemora.memory.scopes import ownership, belongs
+    application.registry.assert_source(application.owner, agent_id, app_id, channel)
+    archive_path = application.registry.archive_db_path(application.owner, agent_id)
+
+    def readonly(path):
+        db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        db.row_factory = sqlite3.Row
+        return closing(db)
+
+    if not archive_path.exists():
+        return {}
+    with readonly(archive_path) as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_scopes'").fetchone():
+            return {}
+        scope = db.execute("SELECT id FROM maintenance_scopes WHERE app=? AND channel=?",
+                           (app_id, channel)).fetchone()
+    if scope is None:
+        return {}
+    path = archive_path.with_name(f"maintenance_{scope[0]}.sqlite")
+    memory_path = archive_path.with_name(f"memory_{channel}.sqlite")
+    if not path.exists() or not memory_path.exists():
+        return {}
+    with readonly(path) as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_reflection_signals'").fetchone():
+            return {}
+        # 按真实写入先后覆盖，同一张卡以最后一次有效修订的建议为准。
+        signals = db.execute("SELECT * FROM maintenance_reflection_signals ORDER BY rowid").fetchall()
+    with readonly(memory_path) as db:
+        db.execute("BEGIN")
+        scopes = ownership(db, agent_id, channel)
+        current = dict(db.execute("SELECT id,current_revision_id FROM cards"))
+        return {r["card_id"]: {**({"affinity": r["affinity"]} if r["affinity"] is not None else {}),
+                               "bias": r["bias"]}
+                for r in signals if current.get(r["card_id"]) == r["current_revision_id"]
+                and belongs(scopes.get(r["card_id"]), app_id, channel)}
+
+
+def _reflection_signal(output):
+    values = {}
+    for key, low, high in (("ambient_affinity", 0, 1), ("salience_vote", -1, 1)):
+        if key in output:
+            value = output[key]
+            if type(value) not in (int, float) or not low <= value <= high or not math.isfinite(value):
+                raise ValueError(f"invalid reflection {key}")
+            values[key] = value
+    if not values:
+        return None
+    affinity = values.get("ambient_affinity")
+    bias = ((affinity - .5) * .12 if affinity is not None else 0) + values.get("salience_vote", 0) * .04
+    return affinity, max(-.10, min(.10, bias))
+
+
 def reflect(application, agent_id, app_id, channel, path, provider, limit):
     errors = []
     with connect(path) as db:
@@ -225,12 +286,20 @@ def reflect(application, agent_id, app_id, channel, path, provider, limit):
                     raise ValueError("invalid reflection suggestion")
                 with connect(path) as db, db:
                     db.execute("UPDATE maintenance_reflections SET text=? WHERE candidate_id=?", (text, row["candidate_id"]))
+            # 从原调用回执恢复可选值；建议失败重试也不另调模型。
+            with connect(path) as db:
+                receipt = db.execute("SELECT output FROM maintenance_calls WHERE job_id=? AND module='reflection' "
+                                     "AND status='success' ORDER BY id DESC LIMIT 1", (row["candidate_id"],)).fetchone()
+            signal = _reflection_signal(json.loads(receipt[0])) if receipt else None
             with connect(memory_path) as db:
                 require_card(db, row['card_id'], agent_id, app_id, channel, SOURCE)
             result = application.reflect(agent_id, app_id, channel, text=text, target_kind="memory",
                                          target_id=str(row["card_id"]), target_version=row["revision_id"],
                                          recorded_at=now(), source_ref=row["candidate_id"])
             with connect(path) as db, db:
+                if signal is not None:
+                    db.execute("INSERT OR IGNORE INTO maintenance_reflection_signals VALUES(?,?,?,?,?)",
+                               (row["candidate_id"], row["card_id"], row["revision_id"], *signal))
                 db.execute("UPDATE maintenance_reflections SET status='done',error=NULL,item_id=? WHERE candidate_id=?",
                            (result["item_id"], row["candidate_id"]))
         except Exception as exc:
@@ -318,11 +387,17 @@ def maintenance_tick(application, agent_id, app_id, channel="main", *, limit=4, 
                     else:
                         payload = json.loads(candidate["payload_json"])
                         frozen = freeze(memory_path, agent_id, app_id, channel)
+                        gate_hash = gate.gate_input_hash(payload, frozen, {
+                            "model": "synthetic-injected" if provider.synthetic else provider.model("gatekeeper"),
+                            "thinking_enabled": False, "reasoning_effort": None})
+                        # 上轮 uncertain 且证据/当前卡/模型配置完全相同时，不再付费询问。
+                        # 新用户的确认成为新的 Archive/Scene 候选，会有独立 job。
+                        if (candidate["last_error"] == "uncertain"
+                                and candidate["last_gate_input_hash"] == gate_hash):
+                            continue
                         decision, frozen = gate.decide(payload, frozen, provider=lambda messages: call(
                             provider, path, job["job_id"], "gatekeeper", {"messages": messages}))
-                        ops.record_gate_result(candidate_id, gate.gate_input_hash(payload, frozen, {
-                            "model": "synthetic-injected" if provider.synthetic else provider.model("gatekeeper"),
-                            "thinking_enabled": False, "reasoning_effort": None}),
+                        ops.record_gate_result(candidate_id, gate_hash,
                             decision["reason"], increment=True, db_path=path)
                         if decision["action"] == "drop":
                             ops.mark_candidate_dropped(candidate_id, path, reason=decision["reason"])

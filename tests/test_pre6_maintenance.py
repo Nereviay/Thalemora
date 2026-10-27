@@ -300,8 +300,11 @@ assert result['jobs'][0]['status'] == 'done'
         self.insert(version=3, text="合成待判断约定")
         self.provider.action = "uncertain"
         self.assertEqual("pending", self.tick()["jobs"][0]["status"])
+        calls = len(self.provider.calls)
         self.provider.action = "drop"
-        self.assertIn("dropped", {c["status"] for c in self.tick()["candidates"]})
+        self.tick()  # 没有新证据，不因后台重试再次调用模型。
+        self.assertEqual(calls, len(self.provider.calls))
+        self.assertIn("pending", {c["status"] for c in self.tick()["candidates"]})
         self.assertEqual(revised, self.cards()[0])
 
     def test_scope_isolation_and_permissions(self):
