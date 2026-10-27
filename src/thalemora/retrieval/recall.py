@@ -282,10 +282,14 @@ def archive_context(archive, app_id, channel, anchor):
 
 def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                     visible_memory_ids=(), visible_archive_ids=(), visible_texts=(), host_context=None,
-                    legacy_graph_db_path=None):
+                    legacy_graph_db_path=None, max_memory=None, max_archive=None):
     archive = application.archive(agent_id, app_id, channel)  # 查询为空也必须先授权
     if not isinstance(query, str) or len(query) > 200:
         raise ValueError("本轮问题须为不超过 200 字符的文本")
+    bounded = max_memory is not None or max_archive is not None
+    for limit in (max_memory, max_archive):
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= 2):
+            raise ValueError("可信召回数量须为 1 或 2")
     previous = trusted_previous_text(archive, agent_id, app_id, channel, host_context)
     if previous is not None:
         query = prior_assistant_query(query, previous)
@@ -464,16 +468,21 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
     for item in pool:
         key = "memories" if item["kind"] == "memory" else "archive"
         text = normalized(item["text"])
-        if result[key] or any(text in t or t in text for t in texts):
+        if (len(result[key]) >= ((max_memory if key == "memories" else max_archive) or 1)
+                or any(text in t or t in text for t in texts)):
             continue
         label = "记忆" if key == "memories" else ("历史记录" if original_quote_request(query) else "历史原话")
         identity = (f"{item['id']} 扩展 {item['extension_id']} 基础修订 {item['base_revision_id']}"
                     if 'extension_id' in item else str(item['id']))
         line = f"[{label} {identity}] {item['text'][:300]}"
+        if len("\n".join([*lines, line])) > 700:
+            continue
         lines.append(line)
         texts.append(text)
         result[key].append(item)
     result["rendered"] = "\n".join(lines)[:700]
+    if bounded:
+        return result
     # 只补充本轮已复核的独立证据，不把检索相关性解释成事实关系。
     if (len(result['memories']) == 1
             and re.search(r"两(?:个|件|次|条)|前后|变化|分别", query)):
