@@ -105,4 +105,3 @@ printf '%s\n' "$THALEMORA_TOKEN"
 记忆设计参考了 [Yinglianchun/Ombre-Brain](https://github.com/Yinglianchun/Ombre-Brain) 及其上游 [Ombre Brain](https://github.com/P0luz/Ombre-Brain)，也参考了 [Serein](https://github.com/Yinglianchun/Serein)、[Haven-Ombre](https://github.com/Yinglianchun/Haven-Ombre)、[Paramecium](https://github.com/Shitsuten/paramecium) 和 [awesome-ai-companion](https://github.com/DasterProkio/awesome-ai-companion)。继承的设计、原作者版权与第三方许可见[第三方声明](THIRD_PARTY_NOTICES.md)。
 
 **项目发起与维护：** 小鱼（产品方向、需求与验收）<br>
-**AI 协作：** ChatGPT（老大）（方案、开发协助、审查与文档）
