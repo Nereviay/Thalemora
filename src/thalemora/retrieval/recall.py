@@ -281,7 +281,8 @@ def archive_context(archive, app_id, channel, anchor):
 
 
 def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
-                    visible_memory_ids=(), visible_archive_ids=(), visible_texts=(), host_context=None):
+                    visible_memory_ids=(), visible_archive_ids=(), visible_texts=(), host_context=None,
+                    legacy_graph_db_path=None):
     archive = application.archive(agent_id, app_id, channel)  # 查询为空也必须先授权
     if not isinstance(query, str) or len(query) > 200:
         raise ValueError("本轮问题须为不超过 200 字符的文本")
@@ -352,6 +353,37 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                 memory.update({k: row['provenance'][k] for k in
                                ('extension_id', 'base_revision_id', 'evidence_refs')})
             pool.append(memory)
+    # 用户明确提到的唯一非泛化旧关键词可补候选；语义解释仍交宿主聊天模型。
+    generic = STOP | set("东西 这个 那个 这些 那些 事情 生活 工作 学习 游戏 音乐 电影 朋友 家人 喜欢 讨厌 今天 昨天 明天 最近 时间 地点 人物 活动 记忆 聊天 用户 助手 心情 感觉 关系 问题 内容 信息 记录 日常 兴趣 爱好 经历 计划 目标 偏好".split())
+    keyword_rows = {}
+    for row in rows:
+        if 'extension_id' in row['provenance'] or row['status'] in {'trashed', 'archived', 'retired'}:
+            continue
+        keywords = row['provenance'].get('keywords') or ''
+        if isinstance(keywords, str):
+            try:
+                keywords = json.loads(keywords)
+            except ValueError:
+                keywords = re.split(r"[,，、;；\s]+", keywords)
+        if not isinstance(keywords, list):
+            continue
+        for keyword in set(k.lower().strip() for k in keywords if isinstance(k, str)):
+            if len(keyword) < 2 or keyword in generic:
+                continue
+            if re.search(r'(?<![a-z0-9_])' + re.escape(keyword) + r'(?![a-z0-9_])', query.lower()):
+                keyword_rows.setdefault(keyword, []).append(row)
+    for matches in ([] if re.fullmatch(r"[\u4e00-\u9fff]{2}", query) else keyword_rows.values()):
+        # 可见过滤前判断唯一性，不能靠排除已见卡制造确定性。
+        if len(matches) != 1:
+            continue
+        row = matches[0]
+        if (row['source_id'] in seen_cards
+                or any(k[3] in seen_raw for k in refs.get(row['source_key'], ()))
+                or any(p['source_key'] == row['source_key'] for p in pool)):
+            continue
+        pool.append(dict(kind='memory', id=row['source_id'], text=row['text'],
+                         source_key=row['source_key'],
+                         revision_id=row['provenance']['revision_id'], score=1.0))
     raw = {}
     for term in terms:
         for row in application.search(agent_id, app_id, term, channel, limit=12):
@@ -416,6 +448,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                             and row['provenance'].get('extension_id') == item.get('extension_id')):
                         if 'extension_id' in item:
                             item['evidence_refs'] = row['provenance']['evidence_refs']
+                        item['source_refs'] = sorted(refs.get(row['source_key'], ()))
                         checked.append(item)
                 else:
                     row = db.execute("SELECT version,deleted FROM history_events WHERE app=? AND channel=? "
@@ -466,11 +499,12 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                 result['memories'].append(item)
                 texts.append(text)
                 break
-    # shortcut: 旧 M05 图尚未迁移；07 再核正式图兼容，这里只派生本请求的关键词候选。
+    # 已存图和关键词派生候选保留不同证据标签，不把相似性冒充图边。
     if (len(result['memories']) == 1
             and re.search(r"两(?:个|件|次|条)|前后|分别|比较|对比", query)):
         primary = result['memories'][0]
-        related = index.stored_related_candidates(primary, current.values())
+        related = index.stored_related_candidates(
+            primary, current.values(), legacy_graph_db_path=legacy_graph_db_path)
         related += index.derived_related_candidates(primary, current.values(),
                                                     excluded_keywords=generic)
         for row, relation in related:

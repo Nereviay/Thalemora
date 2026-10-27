@@ -369,6 +369,66 @@ class RecallTests(unittest.TestCase):
                                second['current_revision_id'])
         self.assertNotIn('已记录关联候选', self.recall('比较合成红茶')['rendered'])
 
+    def test_m05_read_external_legacy_graph_readonly_and_revision_gate(self):
+        first = self.card('leg_a', '合成红茶：甲城的方案')
+        second = self.card('leg_b', '合成红茶：乙城的方案')
+        legacy = Path(self.tmp.name) / 'vnext_retrieval.sqlite'
+        with closing(sqlite3.connect(legacy)) as db, db:
+            db.execute('''CREATE TABLE memory_related_edges(
+                card_a_id INTEGER, revision_a_id INTEGER, card_b_id INTEGER,
+                revision_b_id INTEGER, relation TEXT, policy_version TEXT,
+                weight REAL, shared_keywords_json TEXT, reason TEXT)''')
+            db.execute('INSERT INTO memory_related_edges VALUES(?,?,?,?,?,?,?,?,?)',
+                       (first['card_id'], first['current_revision_id'],
+                        second['card_id'], second['current_revision_id'],
+                        'related', 'memory_related_graph:v1', 0.9,
+                        json.dumps(['合成红茶']), 'legacy synthetic'))
+        source_bytes = legacy.read_bytes()
+        query = '比较合成红茶'
+        # 默认新索引无旧图表；旧库必须经宿主内参显式指向。
+        baseline = self.recall(query)
+        self.assertNotIn('已记录关联候选', baseline['rendered'])
+        observed = self.recall(query, legacy_graph_db_path=str(legacy))
+        self.assertIn('已记录关联候选', observed['rendered'])
+        self.assertEqual({m['id'] for m in observed['memories']},
+                         {first['card_id'], second['card_id']})
+        self.assertEqual(legacy.read_bytes(), source_bytes)
+        self.assertLessEqual(len(observed['rendered']), 700)
+        for kwargs in (dict(visible_memory_ids=[second['card_id']]),
+                       dict(visible_archive_ids=['leg_b'])):
+            excluded = self.recall(query, legacy_graph_db_path=str(legacy), **kwargs)
+            self.assertNotIn('已记录关联候选', excluded['rendered'])
+        self.assertNotIn('已记录关联候选',
+                         self.recall('合成红茶', legacy_graph_db_path=str(legacy))['rendered'])
+        self.app.revise_memory(self.agent, 'demo', second['card_id'],
+                               '合成红茶：乙城已经修改',
+                               second['current_revision_id'])
+        expired = self.recall(query, legacy_graph_db_path=str(legacy))
+        self.assertNotIn('已记录关联候选', expired['rendered'])
+        self.assertEqual(legacy.read_bytes(), source_bytes)
+
+    def test_freeform_anchor_recalls_old_plan_without_guessing_new_fact(self):
+        card = self.card('old_mini', '以前准备购买合成品牌 Mac mini')
+        path = self.app.memory_path(self.agent, 'demo', 'main')
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute('UPDATE cards SET keywords=? WHERE id=?',
+                       ('Mac mini,mini', card['card_id']))
+        query = '我最后买了 MacBook Air，mini 不考虑了'
+        # 刻意隔离原索引命中，以验证“旧实体关键词”补候选确实生效。
+        with patch('thalemora.retrieval.recall.RetrievalIndex.search', return_value=[]):
+            result = self.recall(query)
+        self.assertEqual([m['id'] for m in result['memories']], [card['card_id']])
+        self.assertIn('Mac mini', result['rendered'])
+        self.assertNotIn('MacBook Air', result['rendered'])
+        self.assertNotIn('fact_hints', result)
+        self.assertEqual(self.recall(query, visible_memory_ids=[card['card_id']])['memories'], [])
+        self.assertLessEqual(len(result['rendered']), 700)
+        with patch('thalemora.retrieval.recall.RetrievalIndex.search', return_value=[]):
+            self.assertFalse(self.recall('我换工作了')['memories'])
+        self.insert('old_mini', '', version=2, deleted=True)
+        with patch('thalemora.retrieval.recall.RetrievalIndex.search', return_value=[]):
+            self.assertEqual(self.recall(query)['memories'], [])
+
     def test_derived_relation_scope_and_stale_revision(self):
         first = self.card('root', '合成红茶和合成茶壶：主来源')
         self.app.grant_source(self.agent, 'other-app')

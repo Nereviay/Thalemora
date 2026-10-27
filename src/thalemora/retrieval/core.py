@@ -465,8 +465,8 @@ class RetrievalIndex:
             })
         return out
 
-    def stored_related_candidates(self, primary, rows):
-        """兼容已有的 M05 关联边；只认当前授权来源/当前修订，不产生或补造边。"""
+    def stored_related_candidates(self, primary, rows, *, legacy_graph_db_path=None):
+        """读取可信内部旧图路径（须与当前 Memory 使用同一 ID 空间），不创建表。"""
         current = {row['source_id']: row for row in rows
                    if 'extension_id' not in row['provenance']
                    and row['status'] not in {'trashed', 'archived', 'retired'}}
@@ -475,7 +475,7 @@ class RetrievalIndex:
                 or source['text'] != primary['text']
                 or source['provenance']['revision_id'] != primary['revision_id']):
             return []
-        with self._connect() as db:
+        with _ro(legacy_graph_db_path or self.db_path) as db:
             if not db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_related_edges'").fetchone():
                 return []
             edges = db.execute(
