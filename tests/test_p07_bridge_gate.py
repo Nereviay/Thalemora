@@ -11,8 +11,8 @@ from test_p06_continuity import ContinuityTests as _Continuity
 
 
 def final_messages(result, user_text):
-    # 只模拟现役 context_assembly 的 normal_projection: 动态记忆块
-    # 追加到最后一条 user 消息（不是独立 system 消息），仍不代表线上 Provider 实测。
+    # 简化模拟现役 normal_projection：文本层模拟 system，API 仍为 user；
+    # 实际 Runtime / Gemini 转换另在隔离服务测，不以此冒充线上 Provider 验收。
     blocks = []
     if result['rendered']:
         blocks.append(dict(id='memory_vnext_prelude',
@@ -20,7 +20,10 @@ def final_messages(result, user_text):
     user = user_text
     if blocks:
         # 与现役 context_assembly._NORMAL_REFERENCE_MARKER 的字面值对齐。
-        user += '\n\n【本轮参考资料｜系统提供，非用户发言】\n\n' + '\n\n'.join(b['content'] for b in blocks)
+        user += ('\n\n【本轮参考资料｜系统提供，非用户发言】\n\n'
+                 '<message role="system">\n'
+                 + '\n\n'.join(b['content'] for b in blocks)
+                 + '\n</message>')
     return blocks, [dict(role='system', content='合成固定 Persona'),
                     dict(role='user', content=user)]
 
@@ -54,6 +57,8 @@ class BridgeGateTests(unittest.TestCase):
                 self.assertEqual(blocks[0]['id'], 'memory_vnext_prelude')
                 self.assertEqual(messages[0]['role'], 'system')
                 self.assertEqual(messages[-1]['role'], 'user')
+                self.assertEqual(messages[-1]['content'].count('<message role="system">'), 1)
+                self.assertTrue(messages[-1]['content'].endswith('</message>'))
                 self.assertIn('预览分支', messages[-1]['content'])
                 self.assertIn('合成固定 Persona', messages[0]['content'])
                 memory, = blocks[0]['trace']['memories']
