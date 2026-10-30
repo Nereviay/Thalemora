@@ -282,7 +282,8 @@ def archive_context(archive, app_id, channel, anchor):
 
 def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                     visible_memory_ids=(), visible_archive_ids=(), visible_texts=(), host_context=None,
-                    legacy_graph_db_path=None, max_memory=None, max_archive=None):
+                    legacy_graph_db_path=None, max_memory=None, max_archive=None,
+                    memory_rows=None, index_path=None):
     archive = application.archive(agent_id, app_id, channel)  # 查询为空也必须先授权
     if not isinstance(query, str) or len(query) > 200:
         raise ValueError("本轮问题须为不超过 200 字符的文本")
@@ -318,14 +319,18 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
     except ProviderUnavailable as exc:
         embedding_warning(exc)
         model_id, embedder = "unavailable", None
-    # sources 的现有稳定行号仅用于派生文件名，分开 app 的向量缓存。
-    with closing(sqlite3.connect(application.registry.registry_path)) as db:
-        scope = db.execute("SELECT rowid FROM sources WHERE agent_id=? AND app_id=? AND channel=?",
-                           (agent_id, app_id, channel)).fetchone()[0]
-    index = RetrievalIndex(str(path.with_name(f"recall_{scope}.sqlite")),
+    # 可信进程内宿主可提供只读候选与派生索引路径；独立产品仍按 registry 隔离。
+    if index_path is None:
+        with closing(sqlite3.connect(application.registry.registry_path)) as db:
+            scope = db.execute("SELECT rowid FROM sources WHERE agent_id=? AND app_id=? AND channel=?",
+                               (agent_id, app_id, channel)).fetchone()[0]
+        index_path = path.with_name(f"recall_{scope}.sqlite")
+    read_rows = ((lambda: memory_rows(visible_archive_ids)) if memory_rows is not None
+                 else (lambda: scoped_rows(path, app_id, channel, archive.path, agent_id)))
+    index = RetrievalIndex(str(index_path),
                            memory_db_path=str(path), embedding_model=model_id, embedder=embedder)
     expected = index._generation('memory_card')
-    rows, refs, suppressed_raw = scoped_rows(path, app_id, channel, archive.path, agent_id)
+    rows, refs, suppressed_raw = read_rows()
     try:
         ensure_current_index(index, rows, embedder, expected_generation=expected)
         candidates = index.search(query, top_k=12, pool=24, lexical_queries=terms) if rows else []
@@ -334,7 +339,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
         # Re-read under a NEW fence: no stale vector/model reuse and no model retry.
         index.embedder = None
         expected = index._generation('memory_card')
-        rows, refs, suppressed_raw = scoped_rows(path, app_id, channel, archive.path, agent_id)
+        rows, refs, suppressed_raw = read_rows()
         ensure_current_index(index, rows, None, expected_generation=expected)
         candidates = index.search(query, top_k=12, pool=24, lexical_queries=terms) if rows else []
     seen_cards, seen_raw = set(visible_memory_ids), set(visible_archive_ids)
@@ -440,7 +445,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                                  revision_id=row['provenance']['revision_id'], score=0.0))
     # 模型调用可能很慢；输出前重核来源和正式修订，不把期间失效的候选注入。
     if pool:
-        latest, refs, suppressed_raw = scoped_rows(path, app_id, channel, archive.path, agent_id)
+        latest, refs, suppressed_raw = read_rows()
         current = {r['source_key']: r for r in latest}
         checked = []
         with closing(sqlite3.connect(archive.path)) as db:
@@ -452,6 +457,9 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                             and row['provenance'].get('extension_id') == item.get('extension_id')):
                         if 'extension_id' in item:
                             item['evidence_refs'] = row['provenance']['evidence_refs']
+                        if row['provenance'].get('legacy_unverified'):
+                            item.update(ownership='unknown', evidence_resolution='legacy_unverified',
+                                        verified=False)
                         item['source_refs'] = sorted(refs.get(row['source_key'], ()))
                         checked.append(item)
                 else:
@@ -472,6 +480,8 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                 or any(text in t or t in text for t in texts)):
             continue
         label = "记忆" if key == "memories" else ("历史记录" if original_quote_request(query) else "历史原话")
+        if item.get('evidence_resolution') == 'legacy_unverified':
+            label = '旧记忆候选，证据未核实'
         identity = (f"{item['id']} 扩展 {item['extension_id']} 基础修订 {item['base_revision_id']}"
                     if 'extension_id' in item else str(item['id']))
         line = f"[{label} {identity}] {item['text'][:300]}"
@@ -488,7 +498,9 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
             and re.search(r"两(?:个|件|次|条)|前后|变化|分别", query)):
         primary = result['memories'][0]
         for item in pool:
-            if (item['kind'] != 'memory' or item['id'] == primary['id']
+            if (item.get('evidence_resolution') == 'legacy_unverified'
+                    or primary.get('evidence_resolution') == 'legacy_unverified'
+                    or item['kind'] != 'memory' or item['id'] == primary['id']
                     or not any(t in item['text'].lower() for t in terms)):
                 continue
             first_refs = refs.get(primary['source_key'], set())
@@ -525,7 +537,9 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
             first_refs = refs.get(primary['source_key'], set())
             second_refs = refs.get(row['source_key'], set())
             text = normalized(row['text'])
-            if (row['source_id'] in seen_cards or not first_refs or not second_refs
+            if (row['provenance'].get('legacy_unverified')
+                    or primary.get('evidence_resolution') == 'legacy_unverified'
+                    or row['source_id'] in seen_cards or not first_refs or not second_refs
                     or {r[:4] for r in first_refs} & {r[:4] for r in second_refs}
                     or any(r[3] in seen_raw for r in second_refs)
                     or any(text in t or t in text for t in texts)):
@@ -549,7 +563,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
     if re.search(r"以前|之前|后来|修改|改过|更正|纠正|前后|变化", query):
         from thalemora.lifecycle.temporal import temporal_context_hint
         for item in result['memories']:
-            if 'extension_id' in item:
+            if 'extension_id' in item or item.get('evidence_resolution') == 'legacy_unverified':
                 continue
             hint = temporal_context_hint(query + (' 改过' if '修改' in query else ''), dict(
                 text=item['text'], provenance=dict(card_id=item['id'], revision_id=item['revision_id'])), path)
@@ -560,7 +574,8 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
     # 明确追问更正历史时，才按来源有效性补前一版原话；普通问答绝不混入旧事实。
     if re.search(r"旧版本|旧记录|旧记忆|原话|(?:以前|之前|原来).*(?:说|什么|怎么|哪|几|是)|更正.*(?:经过|过程|历史)", query):
         for item in result['memories'][:1]:
-            if item.get('kind') != 'memory' or 'extension_id' in item:
+            if (item.get('kind') != 'memory' or 'extension_id' in item
+                    or item.get('evidence_resolution') == 'legacy_unverified'):
                 continue
             with closing(sqlite3.connect(path)) as db:
                 db.row_factory = sqlite3.Row
@@ -620,12 +635,13 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
             seen_raw.add(row['source_event_id'])
             texts.append(text)
     if statement(query) is not None:
-        latest, latest_refs, _ = scoped_rows(path, app_id, channel, archive.path, agent_id)
+        latest, latest_refs, _ = read_rows()
         hint = compare_statement(query, latest)
         original_texts = [normalized(t) for t in visible_texts if normalized(t)]
         if hint:
             row = next(r for r in latest if r['source_id'] == hint['id'])
-            if (row['source_id'] not in set(visible_memory_ids)
+            if (not row['provenance'].get('legacy_unverified')
+                    and row['source_id'] not in set(visible_memory_ids)
                     and not any(k[3] in set(visible_archive_ids)
                                 for k in latest_refs.get(row['source_key'], ()))
                     and not any(normalized(row['text']) in t or t in normalized(row['text'])

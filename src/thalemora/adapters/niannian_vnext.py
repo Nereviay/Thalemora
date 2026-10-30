@@ -6,7 +6,7 @@
 """
 import json
 import sqlite3
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 
 from thalemora.retrieval.intent import recall_for_intent
@@ -238,3 +238,202 @@ def recall_vnext(application, agent_id, app_id, request, *, surface='normal',
                     raw_refs.append(row[0])
     trace['related'] = dict(memory_refs=memory_refs, raw_event_ids=raw_refs)
     return dict(rendered=result['rendered'], trace=trace)
+
+
+class NiannianReadOnlyRecall:
+    """宿主显式授予整份旧 main 库的读权；不注册身份、不认领卡片、不提供写接口。
+
+    index_path 必须是专用可重建索引，不能复用旧 VNext 或独立产品的索引。
+    Archive 须已由宿主同步并建好公共词法索引；这里不安装/迁移任何源表。
+    """
+
+    def __init__(self, *, binding, owner, agent_id, app_id, memory_path, index_path, providers):
+        from thalemora.adapters.niannian_history import NiannianHistoryBinding
+        if not isinstance(binding, NiannianHistoryBinding):
+            raise ValueError('需要可信 NiannianHistoryBinding')
+        binding.assert_source(owner, agent_id, app_id, 'main')
+        self.binding, self.owner = binding, owner
+        self.agent_id, self.app_id = agent_id, app_id
+        self.path = binding.archive_db_path(owner, agent_id)
+        self._memory_path = Path(memory_path).resolve(strict=True)
+        self.index_path = Path(index_path).resolve()
+        if self.index_path in {self._memory_path, self.path}:
+            raise ValueError('派生索引不能覆盖权威库')
+        self.providers = providers
+
+    def _authorize(self, app_id, channel):
+        from thalemora.identity import AccessDenied
+        self.binding.assert_source(self.owner, self.agent_id, app_id, channel)
+        if app_id != self.app_id:
+            raise AccessDenied('旧卡读权仅授予绑定来源')
+
+    def archive(self, agent_id, app_id, channel='main'):
+        self.binding.archive_db_path(self.owner, agent_id)
+        self._authorize(app_id, channel)
+        return self
+
+    def memory_path(self, agent_id, app_id, channel='main'):
+        self.archive(agent_id, app_id, channel)
+        return self._memory_path
+
+    # 生产既有 Archive 没有独立产品的 FTS/短 gram 表；只读扫描授权的现存历史。
+    from thalemora.app.service import Application as _Application
+    page = staticmethod(_Application.page)
+    del _Application
+
+    def search(self, agent_id, app_id, query, channel='main', *, limit=20, offset=0):
+        from thalemora.retrieval.core import _ro
+        self.page(limit, offset)
+        self.archive(agent_id, app_id, channel)
+        if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200:
+            raise ValueError('词法查询须为 1..200 个字符')
+        with _ro(str(self.path)) as db:
+            return [dict(row) for row in db.execute(
+                'SELECT * FROM history_events WHERE app=? AND channel=? AND deleted=0 '
+                'AND instr(lower(text),lower(?))>0 ORDER BY source_event_id LIMIT ? OFFSET ?',
+                (app_id, channel, query.strip(), limit, offset))]
+
+    def evidence(self, agent_id, app_id, card_id, channel='main', *, limit=20, offset=0):
+        self.page(limit, offset)
+        self.memory_path(agent_id, app_id, channel)
+        return self._evidence(card_id)[offset:offset + limit]
+
+    def _evidence(self, card_id):
+        return self._evidence_by_card(card_id).get(card_id, [])
+
+    def _evidence_by_card(self, card_id=None, *, memory_db=None, archive_db=None):
+        from thalemora.memory.source_validity import resolve_archive_evidence
+        from thalemora.retrieval.core import _ro
+        agent_id, app_id, channel = self.agent_id, self.app_id, 'main'
+        with (nullcontext(memory_db) if memory_db is not None else _ro(str(self._memory_path))) as db:
+            recorded = {}
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='archive_card_scopes'").fetchone():
+                recorded = {r[0]: (r[1], r[2]) for r in db.execute(
+                    'SELECT card_id,app,channel FROM archive_card_scopes')}
+            items = db.execute(
+                'SELECT e.*,r.card_id,r.origin,r.change_type FROM card_evidence e JOIN card_revisions r '
+                'ON r.id=e.revision_id ' + ('WHERE r.card_id=? ' if card_id is not None else '') +
+                'ORDER BY e.id', (card_id,) if card_id is not None else ()).fetchall()
+        grouped = {}
+        for row in items:
+            grouped.setdefault(row['card_id'], []).append(dict(row))
+        with (nullcontext(archive_db) if archive_db is not None else _ro(str(self.path))) as db:
+            for cid, evidence in grouped.items():
+                outside = recorded.get(cid, (app_id, channel)) != (app_id, channel)
+                for item in evidence:
+                    try:
+                        ref = json.loads(item['source_ref'])
+                    except (TypeError, ValueError):
+                        ref = None
+                    if isinstance(ref, dict) and any(k in ref and ref[k] != value for k, value in
+                            (('agent_id', agent_id), ('app', app_id), ('channel', channel))):
+                        outside = True
+                if outside:
+                    grouped[cid] = []
+                    continue
+                for item in evidence:
+                    state = resolve_archive_evidence(db, item, agent_id, app_id, channel)
+                    if (state['resolution'] == 'manual_revision'
+                            and (item['origin'], item['change_type']) != ('manual_ui', 'manual_edit')):
+                        state['resolution'] = 'unsupported'
+                    item.update(state)
+                    if self._legacy_evidence(item):
+                        item.update(resolution='legacy_unverified', verified=False,
+                                    current_source_text=None, source_key=None)
+        return grouped
+
+    def _legacy_evidence(self, item):
+        """缺旧原话证明只标未知；带公共身份的引用不能降级绕过失效核验。"""
+        if item['source_kind'] not in {'user_text_exact', 'assistant_text_exact', 'raw_range',
+                                       'legacy_unverified', 'manual', 'derived', 'agent_mcp', 'chenlin_mcp',
+                                       'bottle_answer'}:
+            return False
+        try:
+            ref = json.loads(item['source_ref'])
+        except (TypeError, ValueError):
+            ref = None
+        if isinstance(ref, dict):
+            if any(k in ref and ref[k] != value for k, value in
+                   (('agent_id', self.agent_id), ('app', self.app_id), ('channel', 'main'))):
+                return False
+            if 'source_event_id' in ref or ref.get('kind') == 'mcp_explicit_manual_revision':
+                return False
+        return True
+
+    def _rows(self, visible_archive_ids):
+        from thalemora.retrieval.recall import scoped_rows
+        from thalemora.adapters.niannian_retrieval import NiannianRetrievalIndex
+        from thalemora.retrieval.core import _ro
+        from thalemora.memory.scopes import ownership
+        visible_raw = {}
+        if visible_archive_ids:
+            ids = list(dict.fromkeys(visible_archive_ids))
+            with _ro(str(self.path)) as db:
+                visible_raw = {r['source_event_id']: r['raw_event_id'] for r in db.execute(
+                    'SELECT source_event_id,raw_event_id FROM history_events '
+                    'WHERE app=? AND channel=? AND source_event_id IN (' +
+                    ','.join('?' for _ in ids) + ')', (self.app_id, 'main', *ids))}
+        with _ro(str(self._memory_path)) as db, _ro(str(self.path)) as archive_db:
+            db.execute('BEGIN')
+            scopes = ownership(db, self.agent_id, 'main')
+            # 全部旧卡均无独立产品来源归属时，公共 scoped_rows 必然为空。
+            if any(s['state'] == 'known' for s in scopes.values()):
+                rows, refs, suppressed = scoped_rows(self._memory_path, self.app_id,
+                                                     'main', self.path, self.agent_id)
+            else:
+                rows, refs, suppressed = [], {}, set()
+            current = {r['card_id']: r for r in db.execute(
+                'SELECT r.id,r.card_id,r.content,c.content AS card_content FROM cards c '
+                'JOIN card_revisions r ON r.id=c.current_revision_id AND r.card_id=c.id')}
+            candidates = NiannianRetrievalIndex._memory_rows(str(self._memory_path), connection=db)
+            evidence_by_card = self._evidence_by_card(memory_db=db, archive_db=archive_db)
+            included = {r['source_key'] for r in rows}
+            for row in candidates:
+                cid = row['source_id']
+                revision = current.get(cid)
+                if (row['source_key'] in included or 'extension_id' in row['provenance']
+                        or scopes[cid]['state'] != 'unknown' or row['status'] not in {'fresh', 'sunk'}
+                        or not revision or revision['id'] != row['provenance']['revision_id']
+                        or revision['content'] != revision['card_content']):
+                    continue
+                evidence = evidence_by_card.get(cid, [])
+                active = [e for e in evidence if e['revision_id'] == revision['id']]
+                # 所有修订中显式外域引用都不借旧宿主读权放行。
+                if (not active or any(e['resolution'] == 'outside_scope' for e in evidence)
+                        or any(e['resolution'] not in {'current', 'manual_revision', 'legacy_unverified'}
+                               for e in active)):
+                    continue
+                legacy = [e for e in evidence if e['resolution'] == 'legacy_unverified']
+                # shortcut: 无可核对 Raw 范围的旧证据遇已见原话时整卡排除，待宿主提供可信映射后再放宽。
+                if visible_archive_ids and (any(type(visible_raw.get(s)) is not int for s in visible_archive_ids) or any(
+                        type(e['raw_event_start_id']) is not int
+                        or type(e['raw_event_end_id']) is not int
+                        or e['raw_event_start_id'] > e['raw_event_end_id']
+                        or any(type(raw) is int and e['raw_event_start_id'] <= raw <= e['raw_event_end_id']
+                               for raw in visible_raw.values()) for e in legacy)):
+                    continue
+                row['provenance']['legacy_unverified'] = True
+                rows.append(row)
+                refs[row['source_key']] = {tuple(e['source_key']) for e in evidence if e['source_key']}
+            suppressed.update(key for keys in refs.values() for key in keys)
+            return rows, refs, suppressed
+
+    def recall_for_turn(self, agent_id, app_id, query, channel='main', **visible):
+        from thalemora.retrieval.recall import recall_for_turn
+        self.archive(agent_id, app_id, channel)
+        from thalemora.retrieval.core import _ro
+        # data_version 只在同一连接上可比较；缓存与观察连接均仅存活本轮。
+        with _ro(str(self._memory_path)) as memory_db, _ro(str(self.path)) as archive_db:
+            cached, versions = None, None
+
+            def read_rows(effective_visible_archive_ids):
+                nonlocal cached, versions
+                current = (memory_db.execute('PRAGMA data_version').fetchone()[0],
+                           archive_db.execute('PRAGMA data_version').fetchone()[0])
+                if cached is None or current != versions:
+                    cached = self._rows(effective_visible_archive_ids)
+                    versions = current
+                return cached
+
+            return recall_for_turn(self, agent_id, app_id, query, channel,
+                                   memory_rows=read_rows, index_path=self.index_path, **visible)
