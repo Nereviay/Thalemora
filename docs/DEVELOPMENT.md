@@ -34,3 +34,23 @@ python3 tools/package_plugins.py ./dist/plugins
 ```
 
 打包只收录固定源码、README 与 LICENSE，不读取本机插件配置。实际使用者通过各宿主设置页填写凭据，不能把私人 token 打进包里。
+
+## 宿主已有后台索引的只读召回
+
+可信 `NiannianHistoryBinding` 宿主可显式提供现存索引与自己的 `providers`：
+
+```python
+from thalemora.adapters.niannian_vnext import NiannianReadOnlyRecall
+
+recall = NiannianReadOnlyRecall(
+    binding=binding, owner=owner, agent_id=agent_id, app_id=app_id,
+    memory_path=memory_path, host_index_path=existing_index_path, providers=providers,
+)
+result = recall.recall_for_turn(agent_id, app_id, query)
+```
+
+`host_index_path` 与原 `index_path` 二选一。后台继续使用原 `RetrievalIndex.refresh_memory_card` / `rebuild_memory` 更新同一个索引；聊天只以 SQLite `mode=ro` 打开它，读取 WAL，不初始化、检查整库或写回。构建凭据的 Memory 路径须与授权来源一致；缺库、错误来源或查询错误直接报错，不退回旧整库路径。
+
+查询复用公共词法/向量算法，最多取 24 张排名候选。只读核对候选的归属、有效状态、当前修订及正文投影、证据、已见原话，在重排后再次核对；过期候选排除，需由后台刷新后才能再次使用。旧来源仍标 `verified=False`，不认领卡片。单轮提供的可见来源和可信上一条助手映射继续生效。
+
+此路径只读旧 `memory:{id}` 单元；不支持扩展单元，也不从部分候选推断整库关键词唯一性。原话搜索仍可能扫描宿主 Archive，尚未优化。未配置 `host_index_path` 的旧合成路径与独立 `Application` 的默认索引维护行为不变。词法离线验收请显式禁用 embedding/rerank provider；传入启用的 provider 会沿用已有模型调用配置。

@@ -283,7 +283,7 @@ def archive_context(archive, app_id, channel, anchor):
 def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                     visible_memory_ids=(), visible_archive_ids=(), visible_texts=(), host_context=None,
                     legacy_graph_db_path=None, max_memory=None, max_archive=None,
-                    memory_rows=None, index_path=None):
+                    memory_rows=None, index_path=None, indexed_memory_rows=None):
     archive = application.archive(agent_id, app_id, channel)  # 查询为空也必须先授权
     if not isinstance(query, str) or len(query) > 200:
         raise ValueError("本轮问题须为不超过 200 字符的文本")
@@ -327,21 +327,33 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
         index_path = path.with_name(f"recall_{scope}.sqlite")
     read_rows = ((lambda: memory_rows(visible_archive_ids)) if memory_rows is not None
                  else (lambda: scoped_rows(path, app_id, channel, archive.path, agent_id)))
-    index = RetrievalIndex(str(index_path),
-                           memory_db_path=str(path), embedding_model=model_id, embedder=embedder)
-    expected = index._generation('memory_card')
-    rows, refs, suppressed_raw = read_rows()
-    try:
-        ensure_current_index(index, rows, embedder, expected_generation=expected)
-        candidates = index.search(query, top_k=12, pool=24, lexical_queries=terms) if rows else []
-    except ProviderUnavailable as exc:
-        embedding_warning(exc)
-        # Re-read under a NEW fence: no stale vector/model reuse and no model retry.
-        index.embedder = None
+    if indexed_memory_rows is not None:
+        index = RetrievalIndex.open_read_only(str(index_path), memory_db_path=str(path),
+                                             embedding_model=model_id, embedder=embedder)
+        try:
+            candidates = index.search(query, top_k=24, pool=24, lexical_queries=terms)
+        except ProviderUnavailable as exc:
+            embedding_warning(exc)
+            index.embedder = None
+            candidates = index.search(query, top_k=24, pool=24, lexical_queries=terms)
+        read_rows = lambda: indexed_memory_rows(candidates, visible_archive_ids)
+        rows, refs, suppressed_raw = read_rows()
+    else:
+        index = RetrievalIndex(str(index_path),
+                               memory_db_path=str(path), embedding_model=model_id, embedder=embedder)
         expected = index._generation('memory_card')
         rows, refs, suppressed_raw = read_rows()
-        ensure_current_index(index, rows, None, expected_generation=expected)
-        candidates = index.search(query, top_k=12, pool=24, lexical_queries=terms) if rows else []
+        try:
+            ensure_current_index(index, rows, embedder, expected_generation=expected)
+            candidates = index.search(query, top_k=12, pool=24, lexical_queries=terms) if rows else []
+        except ProviderUnavailable as exc:
+            embedding_warning(exc)
+            # Re-read under a NEW fence: no stale vector/model reuse and no model retry.
+            index.embedder = None
+            expected = index._generation('memory_card')
+            rows, refs, suppressed_raw = read_rows()
+            ensure_current_index(index, rows, None, expected_generation=expected)
+            candidates = index.search(query, top_k=12, pool=24, lexical_queries=terms) if rows else []
     seen_cards, seen_raw = set(visible_memory_ids), set(visible_archive_ids)
     texts = [normalized(t) for t in visible_texts if normalized(t)]
     current = {r['source_key']: r for r in rows}
@@ -364,6 +376,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
             pool.append(memory)
     # 用户明确提到的唯一非泛化旧关键词可补候选；语义解释仍交宿主聊天模型。
     generic = STOP | set("东西 这个 那个 这些 那些 事情 生活 工作 学习 游戏 音乐 电影 朋友 家人 喜欢 讨厌 今天 昨天 明天 最近 时间 地点 人物 活动 记忆 聊天 用户 助手 心情 感觉 关系 问题 内容 信息 记录 日常 兴趣 爱好 经历 计划 目标 偏好".split())
+    # 有界索引候选不代表整库，不能据此推断关键词在授权全库中唯一。
     keyword_rows = {}
     for row in rows:
         if 'extension_id' in row['provenance'] or row['status'] in {'trashed', 'archived', 'retired'}:
@@ -381,7 +394,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                 continue
             if re.search(r'(?<![a-z0-9_])' + re.escape(keyword) + r'(?![a-z0-9_])', query.lower()):
                 keyword_rows.setdefault(keyword, []).append(row)
-    for matches in ([] if re.fullmatch(r"[\u4e00-\u9fff]{2}", query) else keyword_rows.values()):
+    for matches in ([] if indexed_memory_rows is not None or re.fullmatch(r"[\u4e00-\u9fff]{2}", query) else keyword_rows.values()):
         # 可见过滤前判断唯一性，不能靠排除已见卡制造确定性。
         if len(matches) != 1:
             continue
@@ -420,7 +433,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
             result["errors"].append(dict(module="rerank", error=str(exc)))
     # M04：只在普通 Related 完全无候选时，用已核验正式卡片的精确关键词兜底。
     generic = STOP | set("东西 这个 那个 这些 那些 事情 生活 工作 学习 游戏 音乐 电影 朋友 家人 喜欢 讨厌 今天 昨天 明天 最近 时间 地点 人物 活动 记忆 聊天 用户 助手 心情 感觉 关系 问题 内容 信息 记录 日常 兴趣 爱好 经历 计划 目标 偏好".split())
-    if not pool and re.fullmatch(r"[\u4e00-\u9fff]{2}", query) and query not in generic:
+    if indexed_memory_rows is None and not pool and re.fullmatch(r"[\u4e00-\u9fff]{2}", query) and query not in generic:
         matches = []
         for row in rows:
             provenance = row['provenance']
@@ -454,7 +467,9 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                     row = current.get(item['source_key'])
                     if (row and row['text'] == item['text']
                             and row['provenance']['revision_id'] == item['revision_id']
-                            and row['provenance'].get('extension_id') == item.get('extension_id')):
+                            and row['provenance'].get('extension_id') == item.get('extension_id')
+                            and (indexed_memory_rows is None or not any(
+                                key[3] in seen_raw for key in refs.get(row['source_key'], ())))):
                         if 'extension_id' in item:
                             item['evidence_refs'] = row['provenance']['evidence_refs']
                         if row['provenance'].get('legacy_unverified'):

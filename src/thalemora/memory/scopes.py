@@ -36,14 +36,19 @@ def reference_scope(evidence, agent_id, *, creation=False):
     return ref["app"], ref["channel"]
 
 
-def ownership(db, agent_id, channel):
+def ownership(db, agent_id, channel, *, card_ids=None):
     """同一连接/快照内读 scope 与全部首修订证据；无回填、无首次访问认领。"""
+    ids = tuple(card_ids) if card_ids is not None else None
+    if ids == ():
+        return {}
+    where = " IN (" + ",".join("?" for _ in ids) + ")" if ids is not None else ""
+    args = ids or ()
     recorded = {}
     if db.execute("SELECT 1 FROM sqlite_master WHERE name='archive_card_scopes'").fetchone():
-        recorded = {r[0]: (r[1], r[2]) for r in db.execute("SELECT card_id,app,channel FROM archive_card_scopes")}
+        recorded = {r[0]: (r[1], r[2]) for r in db.execute("SELECT card_id,app,channel FROM archive_card_scopes" + (" WHERE card_id" + where if where else ""), args)}
     first, markers = {}, {}
     for row in db.execute("SELECT r.card_id,r.revision_no,e.source_kind,e.source_ref FROM card_revisions r "
-                          "JOIN card_evidence e ON e.revision_id=r.id ORDER BY e.id"):
+                          "JOIN card_evidence e ON e.revision_id=r.id " + ("WHERE r.card_id" + where if where else "") + " ORDER BY e.id", args):
         if row["revision_no"] == 1:
             first.setdefault(row["card_id"], []).append(reference_scope(row, agent_id, creation=True))
         else:
@@ -55,7 +60,7 @@ def ownership(db, agent_id, channel):
             if isinstance(ref, dict) and ref.get("kind") == "mcp_explicit_manual_revision":
                 markers.setdefault(row["card_id"], []).append(reference_scope(row, agent_id))
     out = {}
-    for (card_id,) in db.execute("SELECT id FROM cards"):
+    for (card_id,) in db.execute("SELECT id FROM cards" + (" WHERE id" + where if where else ""), args):
         refs = first.get(card_id, [])
         known = {ref for ref in refs if ref is not None}
         record = recorded.get(card_id)

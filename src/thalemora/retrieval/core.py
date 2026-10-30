@@ -141,6 +141,22 @@ class RetrievalIndex:
             os.makedirs(parent, exist_ok=True)
         self._initialize()
 
+    @classmethod
+    def open_read_only(cls, db_path, *, memory_db_path, embedding_model, embedder):
+        """查询后台维护的现存索引；不初始化、不迁移，保留 SQLite WAL 可见性。"""
+        index = object.__new__(_ReadOnlyRetrievalIndex)
+        index.db_path = os.path.realpath(db_path)
+        index.memory_db_path = os.path.realpath(memory_db_path)
+        if index.db_path == index.memory_db_path:
+            raise ValueError('索引路径必须与 Memory 来源分离')
+        index.embedding_model, index.embedder = embedding_model, embedder
+        with index._connect() as db:
+            sources = db.execute(
+                "SELECT DISTINCT source_path FROM build_receipts WHERE source_kind='memory_card'").fetchall()
+            if not sources or any(os.path.realpath(r[0]) != index.memory_db_path for r in sources):
+                raise RetrievalShadowError('索引 Memory 来源不匹配或缺少后台构建凭据')
+        return index
+
     @contextmanager
     def _connect(self):
         conn = sqlite3.connect(self.db_path, timeout=10)
@@ -686,3 +702,11 @@ class RetrievalIndex:
             item['provenance'] = json.loads(item.pop('provenance_json'))
             out.append(item)
         return out
+
+
+class _ReadOnlyRetrievalIndex(RetrievalIndex):
+    @contextmanager
+    def _connect(self):
+        with _ro(self.db_path) as db:
+            db.execute('PRAGMA query_only=ON')
+            yield db
