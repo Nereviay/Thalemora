@@ -1,4 +1,4 @@
-"""07 本地合成 Gate；假 Context/Provider 不代表现役 Runtime 验收。"""
+"""07 合成 Gate：执行真实公共召回；不代表旧 VNext 算法或现役 Runtime 验收。"""
 import json
 import unittest
 from unittest.mock import patch
@@ -29,10 +29,16 @@ def final_messages(result, user_text):
 
 
 class BridgeGateTests(unittest.TestCase):
-    setUp = _Fixtures.setUp
+    _fixture_setup = _Fixtures.setUp
     event = _Fixtures.event
     insert = _Fixtures.insert
     card = _Fixtures.card
+
+    def setUp(self):
+        self._fixture_setup()
+        network = patch('socket.socket.connect', side_effect=AssertionError('禁止联网'))
+        network.start()
+        self.addCleanup(network.stop)
 
     def bridge(self, surface='normal', **request):
         return recall_vnext(self.app, self.agent, 'demo', request, surface=surface,
@@ -41,6 +47,104 @@ class BridgeGateTests(unittest.TestCase):
     def ref(self, source):
         return dict(agent_id=self.agent, app_id='demo', channel='main',
                     source_event_id=source, version=1)
+
+    def checked_bridge(self, request, *, expected_calls=1, **host):
+        # wraps 只计数，候选、排序、来源核验均执行公共核心原函数。
+        with patch.object(self.app, 'recall_for_turn', wraps=self.app.recall_for_turn) as recall, \
+                patch.object(self.app.providers, 'call', wraps=self.app.providers.call) as provider:
+            result = recall_vnext(self.app, self.agent, 'demo', request, **host)
+        self.assertEqual(recall.call_count, expected_calls)
+        self.assertEqual(provider.call_count, 0)
+        self.assertEqual(self.app.providers.audit(), [])
+        self.assertLessEqual(len(result['rendered']), 700)
+        return result
+
+    def test_public_normal_short_denial_and_correction(self):
+        tea = self.card('tea', '乌龙茶适合周末冲泡')
+        self.card('flower', '茉莉花茶适合春天购买')
+        game = self.card('game', '我平常玩合成丙游戏')
+        home = self.card('home', '角色A的居住地是成都')
+        for version, (query, previous, expected) in enumerate((
+            ('乌龙茶', '1、茉莉花茶\n2、乌龙茶', tea),
+            ('第二个呢？', '1、茉莉花茶\n2、乌龙茶', tea),
+            ('我没玩过那两个游戏', '你玩合成甲游戏还是合成乙游戏？', game),
+            ('我之前记错了，角色A的居住地是重庆', '刚才在聊居住地', home),
+        ), 1):
+            with self.subTest(query=query):
+                event = self.event('prior', previous, version=version)
+                event.update(role='assistant', epoch_id='epoch')
+                self.app.import_history(self.agent, 'demo', [event])
+                mapped = self.ref('prior') | {'version': version}
+                prior = mapped | {'text': previous}
+                direct = self.app.recall_for_turn(self.agent, 'demo', query, host_context=dict(
+                    previous_assistant_ref=prior, conversation_id='synthetic', current_epoch_id='epoch'))
+                result = self.checked_bridge(dict(user_text=query,
+                    previous_assistant_event_id='assistant-nine', current_epoch_id='epoch'),
+                    raw_to_archive={'assistant-nine': mapped}, previous_assistant_ref=prior,
+                    conversation_id='synthetic')
+                self.assertEqual(result['rendered'], direct['rendered'])
+                self.assertEqual({k: result['trace'][k] for k in direct if k != 'rendered'},
+                                 {k: v for k, v in direct.items() if k != 'rendered'})
+                self.assertEqual([m['id'] for m in result['trace']['memories']], [expected['card_id']])
+                self.assertEqual(result['trace']['related']['memory_refs'], [dict(
+                    card_id=expected['card_id'], revision_id=expected['current_revision_id'])])
+                self.assertFalse(result['trace']['archive'])
+                if expected == home:
+                    self.assertEqual(result['trace']['fact_hints'][0]['status'], 'explicit_correction')
+                    current = next(c for c in self.app.memory(self.agent, 'demo') if c['id'] == home['card_id'])
+                    self.assertEqual(current['content'], '角色A的居住地是成都')
+
+    def test_intent_anchors_and_host_skip_actual_calls(self):
+        rule = self.card('rule', '青岚工程只允许在预览分支修改')
+        self.insert('walk', '紫杉步道散步很舒服')
+        for surface, request, host, calls, memory_ids, archive_ids in (
+            ('contact', {'recent_activity': ['紫杉步道']}, None, 0, [], []),
+            ('activity', {'recent_activity': ['紫杉步道']}, None, 1, [], ['walk']),
+            ('contact', {'open_loops': [{'content': '青岚工程', 'status': 'done'}]}, None, 0, [], []),
+            ('contact', {'open_loops': [{'content': '青岚工程', 'status': 'open'}]}, None,
+             1, [rule['card_id']], []),
+            ('preaction', {'tool_name': 'edit_file', 'arguments': {'project': '青岚工程'},
+                           'needs_precheck': True}, None, 0, [], []),
+            ('preaction', {'tool_name': 'edit_file', 'arguments': {'project': '青岚工程'}},
+             {'needs_precheck': True}, 1, [rule['card_id']], []),
+            *(( 'preaction', {'tool_name': 'edit_file', 'arguments': {'project': '青岚工程'}},
+                {'needs_precheck': True, flag: True}, 0, [], [])
+              for flag in ('read_only', 'routine', 'already_checked')),
+        ):
+            with self.subTest(surface=surface, request=request, host=host):
+                result = self.checked_bridge(request, surface=surface,
+                    preaction_context=host, expected_calls=calls)
+                self.assertEqual([m['id'] for m in result['trace']['memories']], memory_ids)
+                self.assertEqual([a['id'] for a in result['trace']['archive']], archive_ids)
+
+    def test_archive_projection_scope_version_and_seen(self):
+        self.insert('quote', '青岚工程原始约定', version=2)
+        self.insert('deleted', '青岚工程已删除原话')
+        self.insert('deleted', '', version=2, deleted=True)
+        self.insert('quote', '青岚工程他人原话', agent=self.other, version=2)
+        self.app.grant_source(self.agent, 'private-app')
+        self.insert('quote', '青岚工程其他应用原话', app_id='private-app', version=2)
+        self.app.grant_source(self.agent, 'demo', channel='private')
+        self.insert('quote', '青岚工程私人通道原话', channel='private', version=2)
+        current = self.ref('quote') | {'version': 2}
+        mapping = {71: current, 72: current | {'agent_id': self.other},
+                   73: current | {'app_id': 'private-app'}, 74: current | {'channel': 'private'},
+                   75: self.ref('quote'), '76': current, 77: self.ref('deleted')}
+        for surface, payload in (
+            ('normal', dict(user_text='青岚工程')),
+            ('contact', dict(open_loops=['青岚工程'])),
+            ('activity', dict(recent_activity=['青岚工程'])),
+            ('preaction', dict(tool_name='edit_file', arguments={'project': '青岚工程'})),
+        ):
+            for visible in ([], [71]):
+                with self.subTest(surface=surface, visible=visible):
+                    result = self.checked_bridge(payload | {'visible_raw_event_ids': visible},
+                        surface=surface, raw_to_archive=mapping,
+                        preaction_context={'needs_precheck': True})
+                    self.assertEqual([(a['id'], a['version']) for a in result['trace']['archive']],
+                                     [] if visible else [('quote', 2)])
+                    self.assertEqual(result['trace']['related']['raw_event_ids'], [] if visible else [71])
+                    self.assertEqual(result['rendered'], '' if visible else '[历史原话 quote] 青岚工程原始约定')
 
     def test_surfaces_final_messages_single_recall(self):
         card = self.card('rule', '青岚工程只允许在预览分支修改')
@@ -141,12 +245,18 @@ class BridgeGateTests(unittest.TestCase):
 
 
 class MaintenanceBridgeGateTests(unittest.TestCase):
-    setUp = _Continuity.setUp
+    _fixture_setup = _Continuity.setUp
     source = _Continuity.source
     tick = _Continuity.tick
     cards = _Continuity.cards
     revisions = _Continuity.revisions
     seed = _Continuity.seed
+
+    def setUp(self):
+        self._fixture_setup()
+        network = patch('socket.socket.connect', side_effect=AssertionError('禁止联网'))
+        network.start()
+        self.addCleanup(network.stop)
 
     def test_full_clarify_confirm_revision_then_normal_only_current(self):
         before, _ = self.seed('角色A的居住地是成都')
