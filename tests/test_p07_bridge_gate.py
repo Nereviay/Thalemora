@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from thalemora.adapters.niannian_vnext import recall_vnext
+from thalemora.adapters.niannian_vnext import map_canonical_sources, recall_vnext
 from thalemora.identity import AccessDenied
 from thalemora.identity.registry import InvalidIdentity
 from thalemora.retrieval.intent import recall_for_intent
@@ -190,6 +190,50 @@ class BridgeGateTests(unittest.TestCase):
                 self.assertEqual(empty['rendered'], '')
                 self.assertEqual(empty['trace']['memories'], [])
                 self.assertEqual(empty['trace']['archive'], [])
+
+    def test_canonical_source_verified_and_stale(self):
+        row = self.event('canonical:evt-a', '青岚工程只能预览', version=3)
+        row.update(raw_event_id=71, epoch_id='ep')
+        self.app.import_history(self.agent, 'demo', [row])
+        event = dict(event_id='evt-a', raw_event_id=71, status='active',
+                     role='user', content=row['text'], epoch_id='ep')
+        request = dict(user_text='青岚工程', visible_raw_event_ids=[71])
+        resolved = map_canonical_sources(self.app, self.agent, 'demo', request, [event])
+        self.assertEqual(resolved['raw_to_archive'][71]['version'], 3)
+        ambiguous = dict(event, event_id='different')
+        paired = map_canonical_sources(self.app, self.agent, 'demo',
+                                       request, [event, ambiguous])
+        self.assertNotIn(71, paired['raw_to_archive'])
+        changed = dict(event, content='青岚工程现在允许编辑')
+        stale = map_canonical_sources(self.app, self.agent, 'demo', request, [changed])
+        self.assertNotIn(71, stale['raw_to_archive'])
+        result = recall_vnext(self.app, self.agent, 'demo', request, **stale)
+        self.assertFalse(result['rendered'])
+        self.assertEqual(result['trace']['errors'][0]['code'], 'unmapped_raw_events')
+
+    def test_canonical_previous_assistant_only_when_matching(self):
+        row = self.event('canonical:prior', '1、茉莉花茶\n2、乌龙茶')
+        row.update(role='assistant', raw_event_id=72, epoch_id='epoch')
+        self.app.import_history(self.agent, 'demo', [row])
+        request = dict(user_text='第二个呢？', previous_assistant_event_id='prior',
+                       current_epoch_id='epoch')
+        event = dict(event_id='prior', raw_event_id=72, role='assistant',
+                     status='active', content=row['text'], epoch_id='epoch')
+        mapped = map_canonical_sources(self.app, self.agent, 'demo', request, [event])
+        self.assertEqual(mapped['previous_assistant_ref']['source_event_id'], 'canonical:prior')
+        self.assertEqual(mapped['conversation_id'], 'synthetic')
+        bad = dict(event, epoch_id='wrong')
+        rejected = map_canonical_sources(self.app, self.agent, 'demo', request, [bad])
+        self.assertIsNone(rejected['previous_assistant_ref'])
+
+    def test_older_archive_keeps_raw_lineage_outside_visible_window(self):
+        self.card('rule', '青岚工程仅允许预览')
+        old = self.event('canonical:old', '青岚工程原始约定只能预览')
+        old['raw_event_id'] = 444
+        self.app.import_history(self.agent, 'demo', [old])
+        result = self.bridge(user_text='青岚工程')
+        self.assertIn('原始约定', result['rendered'])
+        self.assertIn(444, result['trace']['related']['raw_event_ids'])
 
     def test_seen_mapping_and_missing_mapping(self):
         self.card('archive-rule', '青岚工程只允许预览')

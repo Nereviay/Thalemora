@@ -4,7 +4,91 @@
 请求正文。映射值包含 agent_id/app_id/channel/source_event_id/version。
 缺映射时整包保守为空，避免无法排除当前可见原话。trace 是内部证据包。
 """
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+
 from thalemora.retrieval.intent import recall_for_intent
+
+
+def map_canonical_sources(application, agent_id, app_id, request, canonical_events, *, channel='main'):
+    """把宿主可信 canonical 活跃事件与当前 Archive 版本精确对齐。
+
+    只读本轮显式可见的 Raw ID 和可信上一条 assistant ID；没有可核对的
+    正文、来源、版本或 epoch 时不做猜测。返回值仅供同进程 recall_vnext 使用。
+    """
+    archive = application.archive(agent_id, app_id, channel)
+    wanted = {value for value in request.get('visible_raw_event_ids', ())
+              if type(value) is int and value > 0}
+    previous_id = request.get('previous_assistant_event_id')
+    candidates = {}
+    duplicate_ids = set()
+    raw_id_counts = {}
+    for event in canonical_events:
+        if not isinstance(event, dict) or event.get('status', 'active') != 'active':
+            continue
+        event_id = event.get('event_id')
+        raw_id = event.get('raw_event_id')
+        if not isinstance(event_id, str) or not event_id:
+            continue
+        if not ((type(raw_id) is int and raw_id in wanted) or event_id == previous_id):
+            continue
+        source_id = 'canonical:' + event_id
+        if source_id in candidates:
+            duplicate_ids.add(source_id)
+        candidates[source_id] = event
+        if type(raw_id) is int and raw_id in wanted:
+            raw_id_counts[raw_id] = raw_id_counts.get(raw_id, 0) + 1
+
+    if not candidates:
+        return dict(raw_to_archive={}, previous_assistant_ref=None, conversation_id=None)
+
+    uri = Path(archive.path).resolve().as_uri() + '?mode=ro'
+    names = list(candidates)
+    placeholders = ','.join('?' for _ in names)
+    with closing(sqlite3.connect(uri, uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        db.execute('PRAGMA query_only=ON')
+        rows = db.execute(
+            'SELECT source_event_id,version,role,text,raw_event_id,epoch_id,conversation_id,deleted '
+            'FROM history_events WHERE app=? AND channel=? AND source_event_id IN (' + placeholders + ')',
+            (app_id, channel, *names),
+        ).fetchall()
+    mapping = {}
+    previous = None
+    conversation_id = None
+    ambiguous_raw = set()
+    for row in rows:
+        source_id = row['source_event_id']
+        if source_id in duplicate_ids or row['deleted'] or type(row['version']) is not int:
+            continue
+        event = candidates[source_id]
+        actual_text = event.get('authored_text')
+        if actual_text is None:
+            actual_text = event.get('content')
+        if (not isinstance(actual_text, str) or actual_text != row['text']
+                or row['role'] != event.get('role')
+                or row['epoch_id'] != event.get('epoch_id')
+                or event.get('role') not in ('user', 'assistant')):
+            continue
+        ref = dict(agent_id=agent_id, app_id=app_id, channel=channel,
+                   source_event_id=source_id, version=row['version'])
+        raw_id = event.get('raw_event_id')
+        if (type(raw_id) is int and raw_id > 0 and raw_id == row['raw_event_id']
+                and raw_id_counts.get(raw_id) == 1):
+            if raw_id in mapping:
+                ambiguous_raw.add(raw_id)
+            mapping[raw_id] = ref
+        if (event.get('event_id') == previous_id and row['role'] == 'assistant'
+                and row['text'] and row['conversation_id']
+                and row['epoch_id'] == request.get('current_epoch_id')):
+            mapping[previous_id] = ref
+            previous = dict(ref, text=row['text'])
+            conversation_id = row['conversation_id']
+    for raw_id in ambiguous_raw:
+        mapping.pop(raw_id, None)
+    return dict(raw_to_archive=mapping, previous_assistant_ref=previous,
+                conversation_id=conversation_id)
 
 
 def recall_vnext(application, agent_id, app_id, request, *, surface='normal',
@@ -15,7 +99,7 @@ def recall_vnext(application, agent_id, app_id, request, *, surface='normal',
     generation_key/provider_round 仅透传追踪，不据此执行、授权或写回。
     自然浮现仍由宿主既有 AmbientEngine 调度，不能将检索当成说出回执。
     """
-    application.archive(agent_id, app_id, channel)  # 空请求也验证授权
+    archive = application.archive(agent_id, app_id, channel)  # 空请求也验证授权
     if surface not in {'normal', 'contact', 'activity', 'preaction'}:
         raise ValueError('不支持的 VNext surface')
     scope = (agent_id, app_id, channel)
@@ -84,5 +168,20 @@ def recall_vnext(application, agent_id, app_id, request, *, surface='normal',
                     and item.get('version') == ref['version']
                     and raw_id not in raw_refs):
                 raw_refs.append(raw_id)
+    # 旧原话不一定在当前可见 200 条里；按 Archive 当前版本精确取其 Raw 来源。
+    if result.get('archive'):
+        uri = Path(archive.path).resolve().as_uri() + '?mode=ro'
+        with closing(sqlite3.connect(uri, uri=True)) as db:
+            db.execute('PRAGMA query_only=ON')
+            for item in result['archive']:
+                if not isinstance(item.get('id'), str) or type(item.get('version')) is not int:
+                    continue
+                row = db.execute(
+                    'SELECT raw_event_id FROM history_events '
+                    'WHERE app=? AND channel=? AND source_event_id=? AND version=? AND deleted=0',
+                    (app_id, channel, item['id'], item['version']),
+                ).fetchone()
+                if row and type(row[0]) is int and row[0] > 0 and row[0] not in raw_refs:
+                    raw_refs.append(row[0])
     trace['related'] = dict(memory_refs=memory_refs, raw_event_ids=raw_refs)
     return dict(rendered=result['rendered'], trace=trace)
