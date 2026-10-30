@@ -6,6 +6,7 @@ from unittest.mock import patch
 from thalemora.adapters.niannian_vnext import recall_vnext
 from thalemora.identity import AccessDenied
 from thalemora.identity.registry import InvalidIdentity
+from thalemora.retrieval.intent import recall_for_intent
 from test_p05_intent_recall import IntentRecallTests as _Fixtures
 from test_p06_continuity import ContinuityTests as _Continuity
 
@@ -48,12 +49,15 @@ class BridgeGateTests(unittest.TestCase):
         return dict(agent_id=self.agent, app_id='demo', channel='main',
                     source_event_id=source, version=1)
 
-    def checked_bridge(self, request, *, expected_calls=1, **host):
+    def checked_bridge(self, request, *, expected_calls=1, expected_intent_calls=0, **host):
         # wraps 只计数，候选、排序、来源核验均执行公共核心原函数。
         with patch.object(self.app, 'recall_for_turn', wraps=self.app.recall_for_turn) as recall, \
+                patch('thalemora.adapters.niannian_vnext.recall_for_intent',
+                      wraps=recall_for_intent) as intent, \
                 patch.object(self.app.providers, 'call', wraps=self.app.providers.call) as provider:
             result = recall_vnext(self.app, self.agent, 'demo', request, **host)
         self.assertEqual(recall.call_count, expected_calls)
+        self.assertEqual(intent.call_count, expected_intent_calls)
         self.assertEqual(provider.call_count, 0)
         self.assertEqual(self.app.providers.audit(), [])
         self.assertLessEqual(len(result['rendered']), 700)
@@ -113,7 +117,7 @@ class BridgeGateTests(unittest.TestCase):
         ):
             with self.subTest(surface=surface, request=request, host=host):
                 result = self.checked_bridge(request, surface=surface,
-                    preaction_context=host, expected_calls=calls)
+                    preaction_context=host, expected_calls=calls, expected_intent_calls=1)
                 self.assertEqual([m['id'] for m in result['trace']['memories']], memory_ids)
                 self.assertEqual([a['id'] for a in result['trace']['archive']], archive_ids)
 
@@ -140,7 +144,8 @@ class BridgeGateTests(unittest.TestCase):
                 with self.subTest(surface=surface, visible=visible):
                     result = self.checked_bridge(payload | {'visible_raw_event_ids': visible},
                         surface=surface, raw_to_archive=mapping,
-                        preaction_context={'needs_precheck': True})
+                        preaction_context={'needs_precheck': True},
+                        expected_intent_calls=int(surface != 'normal'))
                     self.assertEqual([(a['id'], a['version']) for a in result['trace']['archive']],
                                      [] if visible else [('quote', 2)])
                     self.assertEqual(result['trace']['related']['raw_event_ids'], [] if visible else [71])
@@ -148,15 +153,20 @@ class BridgeGateTests(unittest.TestCase):
 
     def test_surfaces_final_messages_single_recall(self):
         card = self.card('rule', '青岚工程只允许在预览分支修改')
-        for surface, payload in (
-            ('normal', dict(user_text='青岚工程')),
-            ('contact', dict(open_loops=[{'content': '青岚工程', 'status': 'open'}])),
-            ('activity', dict(recent_activity=['青岚工程'])),
-            ('preaction', dict(tool_name='edit_file', arguments={'project': '青岚工程'}, provider_round=1))):
-            with self.subTest(surface=surface), patch.object(
-                    self.app, 'recall_for_turn', wraps=self.app.recall_for_turn) as call:
-                result = self.bridge(surface, generation_key='synthetic-turn', **payload)
-                self.assertEqual(call.call_count, 1)
+        self.insert('quote', '青岚工程原始约定是仅能预览')
+        mapping = {71: self.ref('rule'), 72: self.ref('quote')}
+        for surface, payload, unrelated in (
+            ('normal', dict(user_text='青岚工程能否修改？'), dict(user_text='紫杉花园浇水')),
+            ('contact', dict(open_loops=[{'content': '青岚工程', 'status': 'open'}]),
+             dict(open_loops=[{'content': '紫杉花园浇水', 'status': 'open'}])),
+            ('activity', dict(recent_activity=['青岚工程']), dict(recent_activity=['紫杉花园浇水'])),
+            ('preaction', dict(tool_name='edit_file', arguments={'project': '青岚工程'}, provider_round=1),
+             dict(tool_name='edit_file', arguments={'project': '紫杉花园浇水'}))):
+            with self.subTest(surface=surface):
+                host = dict(surface=surface, raw_to_archive=mapping,
+                            preaction_context={'needs_precheck': True},
+                            expected_intent_calls=int(surface != 'normal'))
+                result = self.checked_bridge(payload | {'generation_key': 'synthetic-turn'}, **host)
                 blocks, messages = final_messages(result, '合成当前用户消息')
                 self.assertEqual(blocks[0]['id'], 'memory_vnext_prelude')
                 self.assertEqual(messages[0]['role'], 'system')
@@ -168,12 +178,18 @@ class BridgeGateTests(unittest.TestCase):
                 memory, = blocks[0]['trace']['memories']
                 self.assertEqual(memory['id'], card['card_id'])
                 self.assertEqual(memory['revision_id'], card['current_revision_id'])
-                self.assertTrue(memory['source_refs'])
+                self.assertEqual(memory['source_refs'], [(self.agent, 'demo', 'main', 'rule', 1)])
+                self.assertEqual([(a['id'], a['version']) for a in result['trace']['archive']],
+                                 [('quote', 1)])
+                self.assertEqual(result['trace']['related']['raw_event_ids'], [72])
                 self.assertEqual(blocks[0]['trace']['related']['memory_refs'],
                                  [dict(card_id=card['card_id'],
                                        revision_id=card['current_revision_id'])])
                 self.assertLessEqual(len(result['rendered']), 700)
-        self.assertEqual(self.app.providers.audit(), [])
+                empty = self.checked_bridge(unrelated, **host)
+                self.assertEqual(empty['rendered'], '')
+                self.assertEqual(empty['trace']['memories'], [])
+                self.assertEqual(empty['trace']['archive'], [])
 
     def test_seen_mapping_and_missing_mapping(self):
         self.card('archive-rule', '青岚工程只允许预览')
