@@ -108,6 +108,7 @@ class BridgeGateTests(unittest.TestCase):
         for surface, request, host, calls, memory_ids, archive_ids in (
             ('contact', {'recent_activity': ['紫杉步道']}, None, 0, [], []),
             ('activity', {'recent_activity': ['紫杉步道']}, None, 1, [], ['walk']),
+            ('find_activity', {'recent_activity': ['紫杉步道']}, None, 1, [], ['walk']),
             ('contact', {'open_loops': [{'content': '青岚工程', 'status': 'done'}]}, None, 0, [], []),
             ('contact', {'open_loops': [{'content': '青岚工程', 'status': 'open'}]}, None,
              1, [rule['card_id']], []),

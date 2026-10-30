@@ -153,7 +153,7 @@ def recall_vnext(application, agent_id, app_id, request, *, surface='normal',
     自然浮现仍由宿主既有 AmbientEngine 调度，不能将检索当成说出回执。
     """
     archive = application.archive(agent_id, app_id, channel)  # 空请求也验证授权
-    if surface not in {'normal', 'contact', 'activity', 'preaction'}:
+    if surface not in {'normal', 'contact', 'activity', 'find_activity', 'preaction'}:
         raise ValueError('不支持的 VNext surface')
     scope = (agent_id, app_id, channel)
 
