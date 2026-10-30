@@ -4,11 +4,53 @@
 请求正文。映射值包含 agent_id/app_id/channel/source_event_id/version。
 缺映射时整包保守为空，避免无法排除当前可见原话。trace 是内部证据包。
 """
+import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
 from thalemora.retrieval.intent import recall_for_intent
+
+
+def read_canonical_events_for_vnext(runtime_db_path, request):
+    """从宿主现有 Runtime 库只读取本轮所需的 canonical 事件，不另建索引。"""
+    visible = request.get('visible_raw_event_ids', ())
+    if not isinstance(visible, (list, tuple)) or len(visible) > 200:
+        raise ValueError('visible_raw_event_ids 须为最多 200 项')
+    ids = list(dict.fromkeys(v for v in visible if type(v) is int and v > 0))
+    previous = request.get('previous_assistant_event_id')
+    if not ids and not (isinstance(previous, str) and previous):
+        return []
+    clauses = []
+    args = []
+    if ids:
+        clauses.append('raw_event_id IN (' + ','.join('?' for _ in ids) + ')')
+        args.extend(ids)
+    if isinstance(previous, str) and previous:
+        clauses.append('event_id=?')
+        args.append(previous)
+    uri = Path(runtime_db_path).resolve().as_uri() + '?mode=ro'
+    with closing(sqlite3.connect(uri, uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        db.execute('PRAGMA query_only=ON')
+        rows = db.execute(
+            'SELECT event_id,raw_event_id,role,content,epoch_id,status,kind,metadata_json '
+            'FROM message_records WHERE status=? AND role IN (\'user\',\'assistant\') '
+            'AND kind IN (\'message\',\'proactive_message\',\'legacy_display\') '
+            'AND (' + ' OR '.join(clauses) + ')', ('active', *args),
+        ).fetchall()
+    events = []
+    for row in rows:
+        try:
+            metadata = json.loads(row['metadata_json'] or '{}')
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(metadata, dict) or metadata.get('channel', 'main') != 'main':
+            continue
+        events.append(dict(event_id=row['event_id'], raw_event_id=row['raw_event_id'],
+                           role=row['role'], content=row['content'], epoch_id=row['epoch_id'],
+                           status=row['status'], authored_text=metadata.get('authored_text')))
+    return events
 
 
 def map_canonical_sources(application, agent_id, app_id, request, canonical_events, *, channel='main'):
@@ -89,6 +131,17 @@ def map_canonical_sources(application, agent_id, app_id, request, canonical_even
         mapping.pop(raw_id, None)
     return dict(raw_to_archive=mapping, previous_assistant_ref=previous,
                 conversation_id=conversation_id)
+
+
+def recall_vnext_from_runtime(application, agent_id, app_id, request, *,
+                              runtime_db_path, surface='normal', channel='main',
+                              preaction_context=None):
+    """供同机宿主使用的单一薄入口，走真实 canonical → Archive → 公共召回。"""
+    events = read_canonical_events_for_vnext(runtime_db_path, request)
+    mapped = map_canonical_sources(application, agent_id, app_id, request, events,
+                                   channel=channel)
+    return recall_vnext(application, agent_id, app_id, request, surface=surface,
+                        channel=channel, preaction_context=preaction_context, **mapped)
 
 
 def recall_vnext(application, agent_id, app_id, request, *, surface='normal',

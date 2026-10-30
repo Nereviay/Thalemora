@@ -1,9 +1,13 @@
 """07 合成 Gate：执行真实公共召回；不代表旧 VNext 算法或现役 Runtime 验收。"""
 import json
+import sqlite3
 import unittest
+from contextlib import closing
+from pathlib import Path
 from unittest.mock import patch
 
-from thalemora.adapters.niannian_vnext import map_canonical_sources, recall_vnext
+from thalemora.adapters.niannian_vnext import (map_canonical_sources, read_canonical_events_for_vnext,
+                                               recall_vnext, recall_vnext_from_runtime)
 from thalemora.identity import AccessDenied
 from thalemora.identity.registry import InvalidIdentity
 from thalemora.retrieval.intent import recall_for_intent
@@ -190,6 +194,35 @@ class BridgeGateTests(unittest.TestCase):
                 self.assertEqual(empty['rendered'], '')
                 self.assertEqual(empty['trace']['memories'], [])
                 self.assertEqual(empty['trace']['archive'], [])
+
+    def test_runtime_canonical_read_is_bounded_and_main_only(self):
+        path = Path(self.tmp.name) / 'runtime.sqlite'
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute('CREATE TABLE message_records(event_id TEXT,raw_event_id INTEGER,'
+                       'role TEXT,content TEXT,epoch_id TEXT,status TEXT,kind TEXT,metadata_json TEXT)')
+            rows = [
+                ('a', 71, 'user', '青岚工程', 'ep', 'active', 'message', '{}'),
+                ('b', 72, 'user', '其他通道', 'ep', 'active', 'message', '{"channel":"private"}'),
+                ('c', 73, 'user', '已删除', 'ep', 'deleted', 'message', '{}'),
+            ]
+            db.executemany('INSERT INTO message_records VALUES (?,?,?,?,?,?,?,?)', rows)
+        result = read_canonical_events_for_vnext(path, {'visible_raw_event_ids': [71, 72, 73]})
+        self.assertEqual([r['event_id'] for r in result], ['a'])
+        current = self.event('canonical:a', '青岚工程')
+        current.update(raw_event_id=71, epoch_id='ep')
+        self.app.import_history(self.agent, 'demo', [current])
+        old = self.event('canonical:older', '青岚工程原始约定仅能预览')
+        old['raw_event_id'] = 444
+        self.app.import_history(self.agent, 'demo', [old])
+        recall = recall_vnext_from_runtime(
+            self.app, self.agent, 'demo', dict(user_text='青岚工程',
+                visible_raw_event_ids=[71]), runtime_db_path=path)
+        self.assertNotIn('[历史原话 canonical:a]', recall['rendered'])
+        self.assertIn('原始约定', recall['rendered'])
+        self.assertIn(444, recall['trace']['related']['raw_event_ids'])
+        self.assertEqual(read_canonical_events_for_vnext(path, {}), [])
+        with self.assertRaises(ValueError):
+            read_canonical_events_for_vnext(path, {'visible_raw_event_ids': [1] * 201})
 
     def test_canonical_source_verified_and_stale(self):
         row = self.event('canonical:evt-a', '青岚工程只能预览', version=3)
