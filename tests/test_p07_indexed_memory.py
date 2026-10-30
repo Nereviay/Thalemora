@@ -26,6 +26,33 @@ class IndexedMemoryTests(unittest.TestCase):
             host_index_path=path, providers=self.providers)
         return writer
 
+    def test_host_local_vectors_reuse_existing_model_identity(self):
+        import numpy as np
+
+        class SyntheticEmbedding:
+            def encode_one(self, text):
+                return np.asarray([1.0, 0.0], dtype=np.float32)
+
+            def encode_many(self, texts, *, batch_size=16):
+                return np.asarray([[1.0, 0.0] for _ in texts], dtype=np.float32)
+
+        card = self.card()
+        embedder = SyntheticEmbedding()
+        self.providers.configure('embedding', mode='local', model='synthetic')
+        self.providers.local_models['embedding'] = ('synthetic', embedder)
+        path = self.root / 'vnext_retrieval.sqlite'
+        writer = RetrievalIndex(str(path), memory_db_path=str(self.memory),
+                                embedding_model='synthetic', embedder=embedder)
+        writer.rebuild_memory()
+        self.app = NiannianReadOnlyRecall(
+            binding=self.binding, owner=self.owner, agent_id='chenlin',
+            app_id='niannian', memory_path=self.memory,
+            host_index_path=path, providers=self.providers)
+        result = self.recall()
+        self.assertEqual([row['id'] for row in result['memories']], [card['card_id']])
+        self.assertFalse(result['memories'][0]['verified'])
+        self.assertEqual(self.providers.audit(), [])
+
     def test_bounded_candidates_read_only_wal_and_wrong_source(self):
         for i in range(80):
             self.card(text=f'青岚工程第{i}项合成约定')

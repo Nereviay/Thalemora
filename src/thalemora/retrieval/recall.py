@@ -328,6 +328,10 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
     read_rows = ((lambda: memory_rows(visible_archive_ids)) if memory_rows is not None
                  else (lambda: scoped_rows(path, app_id, channel, archive.path, agent_id)))
     if indexed_memory_rows is not None:
+        # 宿主旧索引用本地模型的原始名称，非 Provider 配置的 local: 前缀。
+        config = application.providers.status('embedding')['config']
+        if embedder is not None and config.get('mode') == 'local':
+            model_id = config['model']
         index = RetrievalIndex.open_read_only(str(index_path), memory_db_path=str(path),
                                              embedding_model=model_id, embedder=embedder)
         try:
