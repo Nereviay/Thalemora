@@ -370,7 +370,13 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
             continue
         lexical = sum(t in row["text"].lower() for t in terms) / len(terms)
         cosine = max((float(r.rsplit(":", 1)[1]) for r in item["retrieval_reasons"] if r.startswith("vector_rank:")), default=0)
-        if lexical or cosine >= 0.65:
+        # 宿主旧索引按词拆查询时，命中一个泛词不应直接注入整张旧卡。
+        # 非宿主独立召回保持原有词面规则。
+        lexical_allowed = lexical >= 0.5 if indexed_memory_rows is not None else bool(lexical)
+        asks_history = any(cue in query for cue in
+                           ('之前', '以前', '上次', '那次', '当时', '还记得', '记不记得', '曾经'))
+        semantic_floor = 0.59 if indexed_memory_rows is not None and asks_history else 0.65
+        if lexical_allowed or cosine >= semantic_floor:
             memory = dict(kind='memory', id=row['source_id'], text=row['text'],
                           source_key=row['source_key'], revision_id=row['provenance']['revision_id'],
                           score=max(lexical, cosine))

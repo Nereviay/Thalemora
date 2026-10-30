@@ -26,6 +26,16 @@ class IndexedMemoryTests(unittest.TestCase):
             host_index_path=path, providers=self.providers)
         return writer
 
+    def test_weak_lexical_overlap_is_not_a_memory_match(self):
+        from thalemora.retrieval.recall import query_terms
+        self.card()
+        self.indexed()
+        query = '青岚工程和晴朗天气以及假想城市的讨论'
+        terms = query_terms(query)
+        self.assertLess(sum(t in '青岚工程只能在预览分支修改' for t in terms) / len(terms), .5)
+        self.assertEqual([], self.app.recall_for_turn('chenlin', 'niannian', query)['memories'])
+        self.assertEqual(1, len(self.recall()['memories']))
+
     def test_host_local_vectors_reuse_existing_model_identity(self):
         import numpy as np
 
