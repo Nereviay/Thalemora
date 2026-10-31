@@ -54,3 +54,12 @@ result = recall.recall_for_turn(agent_id, app_id, query)
 查询复用公共词法/向量算法，最多取 24 张排名候选。只读核对候选的归属、有效状态、当前修订及正文投影、证据、已见原话，在重排后再次核对；过期候选排除，需由后台刷新后才能再次使用。旧来源仍标 `verified=False`，不认领卡片。单轮提供的可见来源和可信上一条助手映射继续生效。
 
 此路径只读旧 `memory:{id}` 单元；不支持扩展单元，也不从部分候选推断整库关键词唯一性。原话搜索仍可能扫描宿主 Archive，尚未优化。未配置 `host_index_path` 的旧合成路径与独立 `Application` 的默认索引维护行为不变。词法离线验收请显式禁用 embedding/rerank provider；传入启用的 provider 会沿用已有模型调用配置。
+
+
+## 宿主自然浮现 / 反思信号接线（07 隔离阶段）
+
+宿主已经有自己的自然浮现调度、原记忆索引、Reflection/Activation 信号时，不应再让洄海每轮遍历 Memory 或新增模型。可从已有索引选取至多 40 个候选 ID（需包含仍在余韵期的卡），然后用同一 `NiannianReadOnlyRecall` 的 `ambient_for_turn(engine, ...)` 核对来源和修订、调用公共 `AmbientEngine`、出结果前重新核对；所有真实数据保持只读，只有引擎自己的可丢弃派生状态会写入宿主指定的独立 SQLite。
+
+已有评分直接传 `reflective_bias_by_card_id`、`reflective_affinity_by_card_id`、`activation_bias_by_card_id`，不可擅自补造 LLM 评分；`user_reactivated_card_ids` 与 `spoken_card_ids` 仅使用宿主真实回执。可信进程内调用 `recall_vnext_from_runtime(..., ambient_state={"engine": engine, "candidate_ids": ids, "now": now, "enabled": True, ...})` 会把普通聊天、主动联系的 Related 与 Ambient 组合在同一个最终消息块，并在 trace 中保留卡片与版本；工具拦截仍由宿主维护。这个 opt-in 参数不从客户端请求正文解析。
+
+念念 VNext 开发源码有可选的 `public_vnext_recall` 回调入口；未注入时继续使用旧功能，现役部署未切换。这项开发接线并不意味着生产已经启用公共自然浮现，也不意味着已经验证实际 Provider Token/费用。

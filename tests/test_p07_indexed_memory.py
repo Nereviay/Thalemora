@@ -63,6 +63,72 @@ class IndexedMemoryTests(unittest.TestCase):
         self.assertFalse(result['memories'][0]['verified'])
         self.assertEqual(self.providers.audit(), [])
 
+    def test_host_ambient_uses_verified_cards_and_existing_reflection_signals(self):
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from thalemora.lifecycle import AmbientEngine
+
+        card = self.card()
+        with closing(sqlite3.connect(self.memory)) as db, db:
+            db.execute('UPDATE cards SET importance=10,keywords=? WHERE id=?',
+                       ('青岚', card['card_id']))
+        self.indexed()
+        engine = AmbientEngine(self.root / 'ambient.sqlite')
+        now = datetime(2026, 11, 1, tzinfo=timezone.utc).isoformat()
+        args = dict(candidate_ids=[card['card_id']], epoch='test-epoch',
+                    now=now, context_text='突然想起青岚', enabled=True, seed=20,
+                    reflective_bias_by_card_id={card['card_id']: .07},
+                    reflective_affinity_by_card_id={card['card_id']: .9})
+        selected = self.app.ambient_for_turn(engine, generation_key='first', **args)
+        self.assertEqual(card['card_id'], selected['ambient']['card_id'])
+        self.assertIn('旧记忆候选', selected['rendered'])
+        self.assertEqual(selected, self.app.ambient_for_turn(
+            engine, generation_key='first', **args))
+        quiet = self.app.ambient_for_turn(
+            engine, generation_key='quiet', related_card_ids=[card['card_id']], **args)
+        self.assertFalse(quiet['ambient'])
+        self.assertEqual('', quiet['rendered'])
+        with closing(sqlite3.connect(self.memory)) as db, db:
+            db.execute("UPDATE cards SET status='trashed' WHERE id=?", (card['card_id'],))
+        self.assertEqual('', self.app.ambient_for_turn(
+            engine, generation_key='after-delete', **args)['rendered'])
+        self.assertEqual(self.providers.audit(), [])
+
+    def test_vnext_host_receives_ambient_and_reflection_without_extra_model(self):
+        from datetime import datetime, timezone
+        from thalemora.lifecycle import AmbientEngine
+        from thalemora.adapters.niannian_vnext import recall_vnext
+
+        card = self.card()
+        with closing(sqlite3.connect(self.memory)) as db, db:
+            db.execute("UPDATE cards SET importance=10,keywords='蓝天' WHERE id=?",
+                       (card['card_id'],))
+        self.indexed()
+        engine = AmbientEngine(self.root / 'host_ambient.sqlite')
+        host = dict(engine=engine, candidate_ids=[card['card_id']],
+                    reflective_bias_by_card_id={card['card_id']: .07},
+                    reflective_affinity_by_card_id={card['card_id']: .9},
+                    now=datetime(2026, 11, 1, tzinfo=timezone.utc).isoformat(),
+                    seed=20, enabled=True)
+        request = dict(user_text='今天突然想起蓝天了', generation_key='ambient-1',
+                       current_epoch_id='epoch-1')
+        result = recall_vnext(self.app, 'chenlin', 'niannian', request, ambient_state=host)
+        self.assertEqual(card['card_id'], result['trace']['ambient']['card_id'])
+        self.assertEqual(card['current_revision_id'],
+                         result['trace']['ambient']['revision_id'])
+        self.assertIn('偶然想起的旧记忆候选', result['rendered'])
+        self.assertFalse(result['trace']['related']['memory_refs'])
+        self.assertEqual(result, recall_vnext(
+            self.app, 'chenlin', 'niannian', request, ambient_state=host))
+        quiet = recall_vnext(self.app, 'chenlin', 'niannian',
+                            dict(request, generation_key='ambient-quiet',
+                                 user_text='先检查数据库的错误'),
+                            ambient_state=host)
+        self.assertFalse(quiet['trace']['ambient'].get('card_id'))
+        self.assertEqual('', quiet['rendered'])
+        self.assertEqual([], self.providers.audit())
+
     def test_bounded_candidates_read_only_wal_and_wrong_source(self):
         for i in range(80):
             self.card(text=f'青岚工程第{i}项合成约定')

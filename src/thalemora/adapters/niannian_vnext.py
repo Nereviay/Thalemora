@@ -135,22 +135,24 @@ def map_canonical_sources(application, agent_id, app_id, request, canonical_even
 
 def recall_vnext_from_runtime(application, agent_id, app_id, request, *,
                               runtime_db_path, surface='normal', channel='main',
-                              preaction_context=None):
+                              preaction_context=None, ambient_state=None):
     """供同机宿主使用的单一薄入口，走真实 canonical → Archive → 公共召回。"""
     events = read_canonical_events_for_vnext(runtime_db_path, request)
     mapped = map_canonical_sources(application, agent_id, app_id, request, events,
                                    channel=channel)
     return recall_vnext(application, agent_id, app_id, request, surface=surface,
-                        channel=channel, preaction_context=preaction_context, **mapped)
+                        channel=channel, preaction_context=preaction_context,
+                        ambient_state=ambient_state, **mapped)
 
 
 def recall_vnext(application, agent_id, app_id, request, *, surface='normal',
                  channel='main', raw_to_archive=None, previous_assistant_ref=None,
-                 conversation_id=None, preaction_context=None):
+                 conversation_id=None, preaction_context=None, ambient_state=None):
     """一次公共召回；preaction_context 是宿主已有工具分类/批准结果。
 
     generation_key/provider_round 仅透传追踪，不据此执行、授权或写回。
-    自然浮现仍由宿主既有 AmbientEngine 调度，不能将检索当成说出回执。
+    ambient_state 只接受宿主进程内的预选候选/现有评分，不能来自网络请求正文。
+    决策只是提供上下文，不能将检索或注入当作真实说出口的回执。
     """
     archive = application.archive(agent_id, app_id, channel)  # 空请求也验证授权
     if surface not in {'normal', 'contact', 'activity', 'find_activity', 'preaction'}:
@@ -237,7 +239,33 @@ def recall_vnext(application, agent_id, app_id, request, *, surface='normal',
                 if row and type(row[0]) is int and row[0] > 0 and row[0] not in raw_refs:
                     raw_refs.append(row[0])
     trace['related'] = dict(memory_refs=memory_refs, raw_event_ids=raw_refs)
-    return dict(rendered=result['rendered'], trace=trace)
+    rendered = result['rendered']
+    if ambient_state is not None and surface != 'preaction':
+        mode = 'normal' if surface == 'normal' else 'proactive'
+        context_text = (request.get('user_text', '') if mode == 'normal'
+                        else request.get('now_text', '') or request.get('recent_user_text', ''))
+        host_fields = {key: ambient_state[key] for key in (
+            'candidate_ids', 'now', 'seed', 'enabled',
+            'reflective_bias_by_card_id', 'reflective_affinity_by_card_id',
+            'activation_bias_by_card_id', 'user_reactivated_card_ids', 'spoken_card_ids')
+            if key in ambient_state}
+        decision = application.ambient_for_turn(
+            ambient_state['engine'], generation_key=request.get('generation_key'),
+            epoch=request.get('current_epoch_id'), mode=mode, context_text=context_text,
+            related_card_ids=[m['id'] for m in result.get('memories', ())],
+            visible_card_ids=request.get('exclude_memory_card_ids', ()),
+            quiet=bool(result.get('archive')) or bool(ambient_state.get('quiet')),
+            **host_fields)
+        if not result.get('memories') and not result.get('archive') and decision['rendered']:
+            rendered = (rendered + '\n\n' + decision['rendered']).strip()[:700]
+        selected = decision['ambient']
+        trace['ambient'] = (dict(card_id=selected['card_id'],
+                                 revision_id=selected['revision'],
+                                 reason=decision['reason']) if selected else
+                            dict(surfaced=False, reason=decision['reason']))
+        trace['resonance'] = [dict(card_id=r['card_id'], revision_id=r['revision'],
+                                   strength=r['strength']) for r in decision['resonance']]
+    return dict(rendered=rendered, trace=trace)
 
 
 class NiannianReadOnlyRecall:
@@ -507,6 +535,10 @@ class NiannianReadOnlyRecall:
                 rows.append(row)
                 refs[row['source_key']] = {tuple(e['source_key']) for e in items if e['source_key']}
             return rows, refs, {key for keys in refs.values() for key in keys}
+
+    def ambient_for_turn(self, engine, **host_state):
+        from thalemora.adapters.niannian_ambient import ambient_for_turn
+        return ambient_for_turn(self, engine, **host_state)
 
     def recall_for_turn(self, agent_id, app_id, query, channel='main', **visible):
         from thalemora.retrieval.recall import recall_for_turn
