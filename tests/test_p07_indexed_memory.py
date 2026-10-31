@@ -129,6 +129,82 @@ class IndexedMemoryTests(unittest.TestCase):
         self.assertEqual('', quiet['rendered'])
         self.assertEqual([], self.providers.audit())
 
+    def test_ambient_cannot_restore_visible_raw_or_previous_sources_on_replay(self):
+        from thalemora.adapters.niannian_vnext import recall_vnext
+        from thalemora.lifecycle import AmbientEngine
+
+        for case in ('legacy_visible', 'verified_visible', 'legacy_previous'):
+            with self.subTest(case=case):
+                self.setUp()
+                self.archive.import_history([dict(app='niannian', channel='main',
+                    source_event_id='canonical:one', version=1, raw_event_id=72,
+                    role='assistant' if case == 'legacy_previous' else 'user',
+                    text='合成可见来源', conversation_id='conv', epoch_id='epoch')])
+                ref = dict(agent_id='chenlin', app_id='niannian', channel='main',
+                           source_event_id='canonical:one', version=1)
+                card = (self.card('derived', json.dumps(dict(ref, app='niannian', kind='archive_quote')))
+                        if case == 'verified_visible' else self.card())
+                with closing(sqlite3.connect(self.memory)) as db, db:
+                    db.execute("UPDATE cards SET importance=10,keywords='蓝天' WHERE id=?",
+                               (card['card_id'],))
+                self.indexed()
+                host = dict(engine=AmbientEngine(self.root / 'visible_ambient.sqlite'),
+                    candidate_ids=[card['card_id']], enabled=True, seed=20,
+                    now='2026-11-01T00:00:00+00:00')
+                request = dict(user_text='今天突然想起蓝天了', generation_key='first',
+                               current_epoch_id='epoch')
+                self.assertIn('偶然想起', recall_vnext(
+                    self.app, 'chenlin', 'niannian', request, ambient_state=host)['rendered'])
+                kwargs = dict(raw_to_archive={72: ref})
+                if case == 'legacy_previous':
+                    request['previous_assistant_event_id'] = 'previous'
+                    kwargs.update(raw_to_archive={'previous': ref},
+                                  previous_assistant_ref=dict(ref, text='合成可见来源'),
+                                  conversation_id='conv')
+                else:
+                    request['visible_raw_event_ids'] = [72]
+                for key in ('first', 'next'):
+                    result = recall_vnext(self.app, 'chenlin', 'niannian',
+                        dict(request, generation_key=key), ambient_state=host, **kwargs)
+                    self.assertEqual('', result['rendered'])
+                    self.assertFalse(result['trace']['ambient'].get('card_id'))
+                    self.assertEqual([], result['trace']['resonance'])
+                self.assertEqual([], self.providers.audit())
+
+    def test_proactive_echo_trace_only_references_rendered_echo_and_rechecks_deletion(self):
+        from thalemora.adapters.niannian_vnext import recall_vnext
+        from thalemora.lifecycle import AmbientEngine
+
+        cards = [self.card(text='合成第一段旧事'), self.card(text='合成第二段旧事')]
+        with closing(sqlite3.connect(self.memory)) as db, db:
+            for card, keyword in zip(cards, ('蓝天', '月光')):
+                db.execute('UPDATE cards SET importance=10,keywords=? WHERE id=?',
+                           (keyword, card['card_id']))
+        self.indexed()
+        engine = AmbientEngine(self.root / 'echo_ambient.sqlite')
+        args = dict(candidate_ids=[c['card_id'] for c in cards], enabled=True, seed=20,
+                    epoch='epoch', now='2026-11-01T00:00:00+00:00', mode='proactive')
+        for key, keyword in (('first', '蓝天'), ('second', '月光')):
+            self.assertIsNotNone(self.app.ambient_for_turn(
+                engine, generation_key=key, context_text=keyword, **args)['ambient'])
+        host = dict(engine=engine, **{k: v for k, v in args.items() if k not in ('epoch', 'mode')})
+        request = dict(now_text='此刻很平静', generation_key='echo', current_epoch_id='epoch')
+        result = recall_vnext(self.app, 'chenlin', 'niannian', request,
+                              surface='contact', ambient_state=host)
+        self.assertEqual(1, len(result['trace']['resonance']))
+        selected = result['trace']['resonance'][0]
+        texts = {c['card_id']: text for c, text in zip(cards, ('合成第一段旧事', '合成第二段旧事'))}
+        self.assertIn(texts[selected['card_id']], result['rendered'])
+        self.assertEqual(result, recall_vnext(self.app, 'chenlin', 'niannian', request,
+                                             surface='contact', ambient_state=host))
+        with closing(sqlite3.connect(self.memory)) as db, db:
+            db.execute("UPDATE cards SET status='trashed'")
+        replay = recall_vnext(self.app, 'chenlin', 'niannian', request,
+                              surface='contact', ambient_state=host)
+        self.assertEqual('', replay['rendered'])
+        self.assertEqual([], replay['trace']['resonance'])
+        self.assertEqual([], self.providers.audit())
+
     def test_bounded_candidates_read_only_wal_and_wrong_source(self):
         for i in range(80):
             self.card(text=f'青岚工程第{i}项合成约定')

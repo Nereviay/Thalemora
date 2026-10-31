@@ -249,11 +249,17 @@ def recall_vnext(application, agent_id, app_id, request, *, surface='normal',
             'reflective_bias_by_card_id', 'reflective_affinity_by_card_id',
             'activation_bias_by_card_id', 'user_reactivated_card_ids', 'spoken_card_ids')
             if key in ambient_state}
+        ambient_visible = list(visible)
+        if mode == 'normal' and host:
+            from thalemora.retrieval.recall import trusted_previous_text
+            if trusted_previous_text(archive, agent_id, app_id, channel, host) is not None:
+                ambient_visible.append(host['previous_assistant_ref']['source_event_id'])
         decision = application.ambient_for_turn(
             ambient_state['engine'], generation_key=request.get('generation_key'),
             epoch=request.get('current_epoch_id'), mode=mode, context_text=context_text,
             related_card_ids=[m['id'] for m in result.get('memories', ())],
             visible_card_ids=request.get('exclude_memory_card_ids', ()),
+            visible_archive_ids=ambient_visible,
             quiet=bool(result.get('archive')) or bool(ambient_state.get('quiet')),
             **host_fields)
         if not result.get('memories') and not result.get('archive') and decision['rendered']:

@@ -189,11 +189,14 @@ class AmbientEngine:
                     aligned = [p for p in pool if p['cue']]
                     if aligned:
                         pool = aligned
-                    elif rng.random() < .08:
-                        pool = [p for p in pool if rows[p['card_id']].get('arousal', .3) < .55
-                                and rows[p['card_id']].get('importance', 0) >= 8]
-                    else:
-                        pool = []
+                    elif mode == 'normal':
+                        # 普通聊天无话题线索时才执行低概率安全浮现门槛；
+                        # 主动联系已由独立的 25% 概率门槛控制。
+                        if rng.random() < .08:
+                            pool = [p for p in pool if rows[p['card_id']].get('arousal', .3) < .55
+                                    and rows[p['card_id']].get('importance', 0) >= 8]
+                        else:
+                            pool = []
                     result['reason'] = 'no_eligible_candidate'
                     if pool:
                         pool.sort(key=lambda p: (-p['score'], p['card_id']))

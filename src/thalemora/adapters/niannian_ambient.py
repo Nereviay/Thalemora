@@ -7,6 +7,7 @@ from thalemora.retrieval.core import _ro
 
 def ambient_for_turn(adapter, engine, *, candidate_ids, generation_key, epoch, now,
                      context_text='', mode='normal', related_card_ids=(), visible_card_ids=(),
+                     visible_archive_ids=(),
                      reflective_bias_by_card_id=None, reflective_affinity_by_card_id=None,
                      activation_bias_by_card_id=None, enabled=False, seed=None,
                      quiet=False, user_reactivated_card_ids=(), spoken_card_ids=()):
@@ -30,7 +31,10 @@ def ambient_for_turn(adapter, engine, *, candidate_ids, generation_key, epoch, n
                       for row in selected]
     else:
         candidates = []
-    fresh, _, _ = adapter._indexed_rows(candidates, ())
+    fresh, refs, _ = adapter._indexed_rows(candidates, visible_archive_ids)
+    seen = set(visible_archive_ids)
+    fresh = [r for r in fresh if not any(
+        ref[3] in seen for ref in refs.get(r['source_key'], ()))]
     by_id = {r['source_id']: r for r in fresh}
     bias = reflective_bias_by_card_id or {}
     affinity = reflective_affinity_by_card_id or {}
@@ -46,10 +50,11 @@ def ambient_for_turn(adapter, engine, *, candidate_ids, generation_key, epoch, n
                 keywords = re.split(r'[,，、\s]+', keywords)
         if not isinstance(keywords, list):
             keywords = []
+        arousal = row['provenance'].get('arousal')
         eligible.append(dict(card_id=cid, revision=row['provenance']['revision_id'],
                              current_revision_id=row['provenance']['revision_id'],
                              status=row['status'], importance=row['importance'] or 0,
-                             arousal=row['provenance'].get('arousal', .3),
+                             arousal=.3 if arousal is None else arousal,
                              pinned=bool(row['provenance'].get('pinned')),
                              event_time=row['event_time'], created_at=row['created_at'],
                              keywords=keywords, reflective_bias=bias.get(cid, 0),
@@ -66,12 +71,14 @@ def ambient_for_turn(adapter, engine, *, candidate_ids, generation_key, epoch, n
               if (row := by_id.get(ref['card_id'])) is not None
               and row['provenance']['revision_id'] == ref['revision']]
     # 一次独立再核验，禁止在决策等待期间被改动的卡进入最终 Context。
-    valid, _, _ = adapter._indexed_rows(chosen, ())
+    valid, refs, _ = adapter._indexed_rows(chosen, visible_archive_ids)
+    valid = [r for r in valid if not any(
+        ref[3] in seen for ref in refs.get(r['source_key'], ()))]
     valid_by_id = {r['source_id']: r for r in valid}
     ambient = outcome['ambient']
     if ambient and ambient['card_id'] not in valid_by_id:
         ambient = None
-    resonance = [ref for ref in outcome['resonance'] if ref['card_id'] in valid_by_id]
+    resonance = [ref for ref in outcome['resonance'] if ref['card_id'] in valid_by_id][:1]
     sections = []
     if ambient:
         sections.append('【偶然想起的旧记忆候选】\n' +

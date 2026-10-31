@@ -57,6 +57,14 @@ class AmbientEngineTests(unittest.TestCase):
                            verified_memory_rows=[self.card(2)], context_text='今天很平常')
         self.assertIsNone(no_cue['ambient'])
 
+    def test_proactive_without_topic_cue_uses_proactive_probability(self):
+        # 没有话题线索的主动回忆不应再叠加普通闲聊的 8% 稀有门槛。
+        proactive = self.step('proactive-no-cue', epoch='proactive',
+                              mode='proactive', context_text='平常的一天')
+        self.assertEqual(1, proactive['ambient']['card_id'])
+        normal = self.step('normal-no-cue', epoch='normal', context_text='平常的一天')
+        self.assertIsNone(normal['ambient'])
+
     def test_related_focus_correction_and_distress_suppress(self):
         self.assertIsNotNone(self.step('start')['ambient'])
         for key, changes, reason in (
