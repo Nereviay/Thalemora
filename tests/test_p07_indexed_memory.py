@@ -36,6 +36,20 @@ class IndexedMemoryTests(unittest.TestCase):
         self.assertEqual([], self.app.recall_for_turn('chenlin', 'niannian', query)['memories'])
         self.assertEqual(1, len(self.recall()['memories']))
 
+    def test_host_raw_history_rejects_single_generic_term_match(self):
+        # 合成复现：问广告投放，却误召回只包含「平台」的旧账号申诉。
+        self.archive.import_history([dict(
+            app='niannian', channel='main', source_event_id='canonical:appeal',
+            version=1, role='assistant', text='此前在平台提交账号申诉并等待复核',
+        )])
+        self.indexed()
+        off_topic = self.app.recall_for_turn('chenlin', 'niannian', '投流 广告位 平台')
+        self.assertEqual([], off_topic['archive'])
+        self.assertNotIn('账号申诉', off_topic['rendered'])
+        on_topic = self.app.recall_for_turn('chenlin', 'niannian', '账号 申诉')
+        self.assertEqual([a['id'] for a in on_topic['archive']], ['canonical:appeal'])
+        self.assertEqual([], self.providers.audit())
+
     def test_host_local_vectors_reuse_existing_model_identity(self):
         import numpy as np
 

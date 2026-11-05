@@ -424,7 +424,9 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
         if (agent_id, app_id, channel, source_id, row["version"]) in suppressed_raw or source_id in seen_raw:
             continue
         score = sum(t in row["text"].lower() for t in terms) / len(terms)
-        if score:
+        # 旧宿主原话的单个泛词命中不能把整段无关历史注入 Context。
+        # 与上面宿主 Memory 的最低词面覆盖率一致；独立产品原规则不变。
+        if score > 0 and (indexed_memory_rows is None or score >= 0.5):
             pool.append(dict(kind="archive", id=source_id, version=row["version"], text=row["text"], score=score))
     pool = [p for p in pool if not any(normalized(p["text"]) in t or t in normalized(p["text"]) for t in texts)]
     pool.sort(key=lambda p: -p["score"])
