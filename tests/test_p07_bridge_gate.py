@@ -156,6 +156,14 @@ class BridgeGateTests(unittest.TestCase):
                     self.assertEqual(result['trace']['related']['raw_event_ids'], [] if visible else [71])
                     self.assertEqual(result['rendered'], '' if visible else '[历史原话 quote] 青岚工程原始约定')
 
+    def test_standalone_normal_archive_keeps_statement_matches(self):
+        for version, query in enumerate(('我讨厌你', '十一点你妈'), 1):
+            with self.subTest(query=query):
+                self.insert('quote', query, version=version)
+                result = self.checked_bridge(dict(user_text=query), raw_to_archive={})
+                self.assertEqual(['quote'], [a['id'] for a in result['trace']['archive']])
+                self.assertIn(query, result['rendered'])
+
     def test_surfaces_final_messages_single_recall(self):
         card = self.card('rule', '青岚工程只允许在预览分支修改')
         self.insert('quote', '青岚工程原始约定是仅能预览')

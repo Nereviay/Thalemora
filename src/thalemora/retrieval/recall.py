@@ -362,6 +362,8 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
     texts = [normalized(t) for t in visible_texts if normalized(t)]
     current = {r['source_key']: r for r in rows}
     pool = []
+    asks_history = any(cue in query for cue in
+                       ('之前', '以前', '上次', '那次', '当时', '还记得', '记不记得', '曾经'))
     for item in candidates:
         row = current.get(item['source_key'])
         if row is None or item["text"] != row["text"] or item["provenance"]["revision_id"] != row["provenance"]["revision_id"]:
@@ -373,8 +375,6 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
         # 宿主旧索引按词拆查询时，命中一个泛词不应直接注入整张旧卡。
         # 非宿主独立召回保持原有词面规则。
         lexical_allowed = lexical >= 0.5 if indexed_memory_rows is not None else bool(lexical)
-        asks_history = any(cue in query for cue in
-                           ('之前', '以前', '上次', '那次', '当时', '还记得', '记不记得', '曾经'))
         semantic_floor = 0.59 if indexed_memory_rows is not None and asks_history else 0.65
         if lexical_allowed or cosine >= semantic_floor:
             memory = dict(kind='memory', id=row['source_id'], text=row['text'],
@@ -417,7 +417,11 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                          source_key=row['source_key'],
                          revision_id=row['provenance']['revision_id'], score=1.0))
     raw = {}
-    for term in terms:
+    # 宿主 normal 仅在明确追溯历史时查 Archive；有界意图检索与独立产品保持原规则。
+    archive_allowed = (indexed_memory_rows is None or bounded or asks_history
+                       or '原话' in query
+                       or bool(re.search(r'(?:说过|提过).{0,8}(?:什么|啥|哪)', query)))
+    for term in terms if archive_allowed else ():
         for row in application.search(agent_id, app_id, term, channel, limit=12):
             raw[row["source_event_id"]] = row
     for source_id, row in raw.items():

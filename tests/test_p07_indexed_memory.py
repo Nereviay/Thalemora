@@ -43,10 +43,10 @@ class IndexedMemoryTests(unittest.TestCase):
             version=1, role='assistant', text='此前在平台提交账号申诉并等待复核',
         )])
         self.indexed()
-        off_topic = self.app.recall_for_turn('chenlin', 'niannian', '投流 广告位 平台')
+        off_topic = self.app.recall_for_turn('chenlin', 'niannian', '之前 投流 广告位 平台')
         self.assertEqual([], off_topic['archive'])
         self.assertNotIn('账号申诉', off_topic['rendered'])
-        on_topic = self.app.recall_for_turn('chenlin', 'niannian', '账号 申诉')
+        on_topic = self.app.recall_for_turn('chenlin', 'niannian', '上次 账号 申诉')
         self.assertEqual([a['id'] for a in on_topic['archive']], ['canonical:appeal'])
         self.assertEqual([], self.providers.audit())
 
@@ -57,7 +57,7 @@ class IndexedMemoryTests(unittest.TestCase):
             version=1, role='assistant', text=text,
         )])
         self.indexed()
-        result = self.app.recall_for_turn('chenlin', 'niannian', '账号 申诉 平台')
+        result = self.app.recall_for_turn('chenlin', 'niannian', '之前 账号 申诉 平台')
         self.assertEqual([], result['archive'])
         self.assertEqual('', result['rendered'])
         self.assertEqual([], self.providers.audit())
@@ -69,7 +69,7 @@ class IndexedMemoryTests(unittest.TestCase):
             version=1, role='assistant', text=text,
         )])
         self.indexed()
-        result = self.app.recall_for_turn('chenlin', 'niannian', '账号 申诉 平台')
+        result = self.app.recall_for_turn('chenlin', 'niannian', '之前 账号 申诉 平台')
         self.assertEqual(['canonical:prefix'], [a['id'] for a in result['archive']])
         self.assertEqual(text, result['archive'][0]['text'])
         self.assertEqual(2 / 3, result['archive'][0]['score'])
@@ -85,12 +85,71 @@ class IndexedMemoryTests(unittest.TestCase):
             version=1, role='assistant', text=text,
         ) for event_id, text in (('canonical:tail', tail), ('canonical:prefix', prefix))])
         self.indexed()
-        result = self.app.recall_for_turn('chenlin', 'niannian', '账号 申诉 平台')
+        result = self.app.recall_for_turn('chenlin', 'niannian', '之前 账号 申诉 平台')
         self.assertEqual(['canonical:prefix'], [a['id'] for a in result['archive']])
         self.assertEqual(2 / 3, result['archive'][0]['score'])
         self.assertIn(prefix[:300], result['rendered'])
         self.assertNotIn('无关旧记录', result['rendered'])
         self.assertEqual([], self.providers.audit())
+
+    def test_host_normal_statements_skip_archive_even_with_exact_overlap(self):
+        queries = ('我讨厌你', '十一点你妈', '账号 申诉', '今天 心情 时间',
+                   '明明同窗口才提过的事，下一句又忘了', '你刚才说过的全忘了吗')
+        self.archive.import_history([dict(
+            app='niannian', channel='main', source_event_id=f'old:{i}',
+            version=1, role='assistant', text=query,
+        ) for i, query in enumerate(queries)])
+        self.indexed()
+        with patch.object(self.app, 'search', wraps=self.app.search) as search:
+            for query in queries:
+                with self.subTest(query=query):
+                    result = self.app.recall_for_turn('chenlin', 'niannian', query)
+                    self.assertEqual([], result['archive'])
+                    self.assertEqual('', result['rendered'])
+            search.assert_not_called()
+
+    def test_host_explicit_history_keeps_archive(self):
+        self.archive.import_history([dict(
+            app='niannian', channel='main', source_event_id='old:rule',
+            version=1, role='assistant', text='青岚工程原话说过提过的约定是仅能预览',
+        )])
+        self.indexed()
+        for query in ('上次青岚工程的约定是什么？', '青岚工程原话是什么？',
+                      '青岚工程说过什么？', '青岚工程提过什么？'):
+            with self.subTest(query=query):
+                result = self.app.recall_for_turn('chenlin', 'niannian', query)
+                self.assertEqual(['old:rule'], [a['id'] for a in result['archive']])
+
+    def test_host_normal_keeps_memory_card_while_blocking_archive(self):
+        card = self.card(text='青岚工程只能在预览分支修改')
+        self.archive.import_history([dict(
+            app='niannian', channel='main', source_event_id='old:rule',
+            version=1, role='assistant', text='青岚工程原始约定',
+        )])
+        self.indexed()
+        result = self.recall()
+        self.assertEqual([card['card_id']], [m['id'] for m in result['memories']])
+        self.assertEqual([], result['archive'])
+
+    def test_host_intent_archive_does_not_require_history_cue(self):
+        from thalemora.adapters.niannian_vnext import recall_vnext
+
+        self.archive.import_history([dict(
+            app='niannian', channel='main', source_event_id='old:rule',
+            version=1, role='assistant', text='青岚工程原始约定 edit_file',
+        )])
+        self.indexed()
+        for surface, request in (
+            ('contact', dict(open_loops=['青岚工程'])),
+            ('activity', dict(recent_activity=['青岚工程'])),
+            ('find_activity', dict(recent_activity=['青岚工程'])),
+            ('preaction', dict(tool_name='edit_file', arguments={'project': '青岚工程'})),
+        ):
+            with self.subTest(surface=surface):
+                result = recall_vnext(self.app, 'chenlin', 'niannian', request,
+                    surface=surface, raw_to_archive={},
+                    preaction_context={'needs_precheck': True})
+                self.assertEqual(['old:rule'], [a['id'] for a in result['trace']['archive']])
 
     def test_host_local_vectors_reuse_existing_model_identity(self):
         import numpy as np
