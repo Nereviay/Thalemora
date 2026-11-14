@@ -94,7 +94,8 @@ class IndexedMemoryTests(unittest.TestCase):
 
     def test_host_normal_statements_skip_archive_even_with_exact_overlap(self):
         queries = ('我讨厌你', '十一点你妈', '账号 申诉', '今天 心情 时间',
-                   '明明同窗口才提过的事，下一句又忘了', '你刚才说过的全忘了吗')
+                   '明明同窗口才提过的事，下一句又忘了', '你刚才说过的全忘了吗',
+                   '昨天聊得挺开心', '昨天聊过的事情我还不想管')
         self.archive.import_history([dict(
             app='niannian', channel='main', source_event_id=f'old:{i}',
             version=1, role='assistant', text=query,
@@ -115,7 +116,8 @@ class IndexedMemoryTests(unittest.TestCase):
         )])
         self.indexed()
         for query in ('上次青岚工程的约定是什么？', '青岚工程原话是什么？',
-                      '青岚工程说过什么？', '青岚工程提过什么？'):
+                      '青岚工程说过什么？', '青岚工程提过什么？',
+                      '昨天聊的青岚工程约定是什么？', '刚才谈的青岚工程约定呢？'):
             with self.subTest(query=query):
                 result = self.app.recall_for_turn('chenlin', 'niannian', query)
                 self.assertEqual(['old:rule'], [a['id'] for a in result['archive']])

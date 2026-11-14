@@ -420,7 +420,9 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
     # 宿主 normal 仅在明确追溯历史时查 Archive；有界意图检索与独立产品保持原规则。
     archive_allowed = (indexed_memory_rows is None or bounded or asks_history
                        or '原话' in query
-                       or bool(re.search(r'(?:说过|提过).{0,8}(?:什么|啥|哪)', query)))
+                       or bool(re.search(r'(?:说过|提过).{0,8}(?:什么|啥|哪)', query))
+                       or bool(re.search(r'(?:昨天|前天|刚才|那天).{0,32}(?:聊|谈|说|提|讲)'
+                                         r'.{0,40}(?:什么|啥|哪|怎么|谁|呢)', query)))
     for term in terms if archive_allowed else ():
         for row in application.search(agent_id, app_id, term, channel, limit=12):
             raw[row["source_event_id"]] = row
