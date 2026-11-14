@@ -423,7 +423,8 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
     for source_id, row in raw.items():
         if (agent_id, app_id, channel, source_id, row["version"]) in suppressed_raw or source_id in seen_raw:
             continue
-        score = sum(t in row["text"].lower() for t in terms) / len(terms)
+        scoring_text = row["text"][:300] if indexed_memory_rows is not None else row["text"]
+        score = sum(t in scoring_text.lower() for t in terms) / len(terms)
         # 旧宿主原话的单个泛词命中不能把整段无关历史注入 Context。
         # 与上面宿主 Memory 的最低词面覆盖率一致；独立产品原规则不变。
         if score > 0 and (indexed_memory_rows is None or score >= 0.5):

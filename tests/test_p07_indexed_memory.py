@@ -50,6 +50,48 @@ class IndexedMemoryTests(unittest.TestCase):
         self.assertEqual([a['id'] for a in on_topic['archive']], ['canonical:appeal'])
         self.assertEqual([], self.providers.audit())
 
+    def test_host_long_raw_history_rejects_tail_only_match(self):
+        text = '这是合成的无关旧记录。' * 30 + '账号 申诉 平台'
+        self.archive.import_history([dict(
+            app='niannian', channel='main', source_event_id='canonical:tail',
+            version=1, role='assistant', text=text,
+        )])
+        self.indexed()
+        result = self.app.recall_for_turn('chenlin', 'niannian', '账号 申诉 平台')
+        self.assertEqual([], result['archive'])
+        self.assertEqual('', result['rendered'])
+        self.assertEqual([], self.providers.audit())
+
+    def test_host_long_raw_history_keeps_relevant_prefix_and_full_source(self):
+        text = '账号申诉正在等待复核。' + '这是合成的旧记录。' * 40 + '尾部核验标记'
+        self.archive.import_history([dict(
+            app='niannian', channel='main', source_event_id='canonical:prefix',
+            version=1, role='assistant', text=text,
+        )])
+        self.indexed()
+        result = self.app.recall_for_turn('chenlin', 'niannian', '账号 申诉 平台')
+        self.assertEqual(['canonical:prefix'], [a['id'] for a in result['archive']])
+        self.assertEqual(text, result['archive'][0]['text'])
+        self.assertEqual(2 / 3, result['archive'][0]['score'])
+        self.assertIn(text[:300], result['rendered'])
+        self.assertNotIn('尾部核验标记', result['rendered'])
+        self.assertEqual([], self.providers.audit())
+
+    def test_host_long_raw_history_relevant_prefix_wins_over_tail_match(self):
+        tail = '平台上的无关旧记录。' * 30 + '账号 申诉'
+        prefix = '账号申诉正在等待复核。' + '这是合成的旧记录。' * 40
+        self.archive.import_history([dict(
+            app='niannian', channel='main', source_event_id=event_id,
+            version=1, role='assistant', text=text,
+        ) for event_id, text in (('canonical:tail', tail), ('canonical:prefix', prefix))])
+        self.indexed()
+        result = self.app.recall_for_turn('chenlin', 'niannian', '账号 申诉 平台')
+        self.assertEqual(['canonical:prefix'], [a['id'] for a in result['archive']])
+        self.assertEqual(2 / 3, result['archive'][0]['score'])
+        self.assertIn(prefix[:300], result['rendered'])
+        self.assertNotIn('无关旧记录', result['rendered'])
+        self.assertEqual([], self.providers.audit())
+
     def test_host_local_vectors_reuse_existing_model_identity(self):
         import numpy as np
 
