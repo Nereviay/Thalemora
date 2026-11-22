@@ -1,5 +1,7 @@
 # 开发与模型替身
 
+**0.9.0rc1 是尚未发布的本地待发候选，当前可下载正式版仍为 [v0.8.1](https://github.com/Nereviay/Thalemora/releases/tag/v0.8.1)。** 新的公共记忆选择、自然浮现和余韵仅供具备主动调用条件的客户端或开发者接入；既有 SillyTavern / Operit 插件没有自动升级到新宿主能力，新聊天同步仍需单独接线。
+
 开发接入时，可以使用临时数据和模型替身，不需要付费 API。正常使用后台整理请看[模型与后台整理](AUTOMATIC_MEMORY.md)。
 
 ## 显式运行一轮维护
@@ -21,11 +23,17 @@
 ## 运行相关检查
 
 ```bash
-PYTHONPATH=src:tests python3 -m unittest test_p8_recall test_p8_connector
+PYTHONPATH=src:tests python3 -m unittest test_p8_recall test_p04_ambient test_p05_intent_recall test_p06_continuity test_p07_bridge_gate test_p07_indexed_memory test_p07_legacy_memory test_source_validity_recall test_recall_http_projection
 node --test integrations/sillytavern/index.test.mjs integrations/operit/adapter/settings.test.mjs
 ```
 
 Python 3.10–3.15 均可使用同一份 `requirements.lock`，安装时会自动选择兼容当前 Python 的依赖，不需要为项目另装旧版 Python。测试依赖可用 `python -m pip install -c requirements.lock ".[test]"` 安装。包含网页操作的用例另需 Playwright 浏览器环境；普通 API 测试不需要浏览器。
+
+## 本地核心候选包
+
+版本由 `pyproject.toml` 唯一指定，构建后端为其中固定版本的 setuptools。候选 wheel、sdist 和单独的 `SHA256SUMS.txt` 放入 `dist/0.9.0rc1/`，不要覆盖 `dist/` 中已有的正式版资产。
+
+构建使用全新的临时源码目录，排除 `.git`、`dist`、`build`、缓存和旧 egg-info；先生成 sdist，再从解包的 sdist 构建 wheel，避免混入旧构建残留。安装 wheel 后，在源码目录外检查发行版版本、模块实际导入位置与 `thalemora --help`。只使用临时合成状态，不连接现役数据库或模型。构建和本地安装不代表已获准发布或生产升级。
 
 ## 打包插件
 
@@ -56,7 +64,7 @@ result = recall.recall_for_turn(agent_id, app_id, query)
 此路径只读旧 `memory:{id}` 单元；不支持扩展单元，也不从部分候选推断整库关键词唯一性。原话搜索仍可能扫描宿主 Archive，尚未优化。未配置 `host_index_path` 的旧合成路径与独立 `Application` 的默认索引维护行为不变。词法离线验收请显式禁用 embedding/rerank provider；传入启用的 provider 会沿用已有模型调用配置。
 
 
-## 宿主自然浮现 / 反思信号接线（07 隔离阶段）
+## 可信宿主的自然浮现 / 反思信号接线
 
 宿主已经有自己的自然浮现调度、原记忆索引、Reflection/Activation 信号时，不应再让洄海每轮遍历 Memory 或新增模型。可从已有索引选取至多 40 个候选 ID（需包含仍在余韵期的卡），然后用同一 `NiannianReadOnlyRecall` 的 `ambient_for_turn(engine, ...)` 核对来源和修订、调用公共 `AmbientEngine`、出结果前重新核对；所有真实数据保持只读，只有引擎自己的可丢弃派生状态会写入宿主指定的独立 SQLite。
 
