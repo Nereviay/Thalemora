@@ -12,7 +12,7 @@ from thalemora.inner_world.store import InnerStore
 from thalemora.persona import Persona
 from thalemora.self_model.host import HostedSelfModel
 from thalemora.memory import schema as memory_schema
-from thalemora.memory.revision_store import create_card_in_transaction, update_card_in_transaction
+from thalemora.memory.revision_store import RevisionConflict, create_card_in_transaction, update_card_in_transaction
 from thalemora.memory.source_validity import resolve_archive_evidence
 from thalemora.memory.scopes import SOURCE, OWNER, validate_scope, ownership, belongs, require_card, reference_scope
 from thalemora.water import schema as water_schema
@@ -22,6 +22,10 @@ from thalemora.water.store import create_node
 def plain(value):
     return json.loads(json.dumps(value, default=lambda x: asdict(x) if is_dataclass(x) else x.value,
                                  ensure_ascii=False))
+
+
+def _has_trash_metadata(db):
+    return db.execute("SELECT 1 FROM pragma_table_info('cards') WHERE name='trash_version'").fetchone() is not None
 
 
 class Application:
@@ -176,17 +180,21 @@ class Application:
                 water_schema.initialize(db)
         return path
 
-    def memory(self, agent_id, app_id=None, channel="main", *, limit=20, offset=0, scope=SOURCE):
+    def memory(self, agent_id, app_id=None, channel="main", *, limit=20, offset=0, scope=SOURCE, view="normal"):
         self.page(limit, offset)
+        if view not in ("normal", "trash"):
+            raise ValueError("view 须为 normal 或 trash")
         path = self.memory_path(agent_id, app_id, channel, scope=scope)
         with closing(sqlite3.connect(path)) as db:
             db.row_factory = sqlite3.Row
             db.execute("BEGIN")
             scopes = ownership(db, agent_id, channel)
             db.create_function("in_source_scope", 1, lambda cid: belongs(scopes.get(cid), app_id, channel))
+            version = "trash_version" if _has_trash_metadata(db) else "0 AS trash_version"
             cards = [dict(r) for r in db.execute(
-                "SELECT id,title,content,happened_at,current_revision_id,memory_kind FROM cards "
-                "WHERE ? OR in_source_scope(id) ORDER BY id LIMIT ? OFFSET ?", (scope == OWNER, limit, offset))]
+                f"SELECT id,title,content,happened_at,current_revision_id,memory_kind,{version} FROM cards "
+                "WHERE (status IS 'trashed') = ? AND (? OR in_source_scope(id)) ORDER BY id LIMIT ? OFFSET ?",
+                (view == "trash", scope == OWNER, limit, offset))]
         from thalemora.memory.extensions import scoped_extensions
         archive_path = self.registry.archive_db_path(self.owner, agent_id)
         extensions = scoped_extensions(path, archive_path, agent_id, app_id, channel, scope=scope)
@@ -225,6 +233,8 @@ class Application:
         path = self.memory_path(agent_id, app_id, channel, scope=scope)
         with self._memory_transaction(agent_id, app_id, channel, scope, path) as db:
             card_scope = require_card(db, card_id, agent_id, app_id, channel, scope)
+            if db.execute("SELECT status FROM cards WHERE id=?", (card_id,)).fetchone()[0] == "trashed":
+                raise ValueError("请先恢复回收站中的记忆")
             ref = {"kind": "mcp_explicit_manual_revision"}
             if card_scope['state'] == 'known':
                 ref.update(agent_id=agent_id, app=card_scope['app'], channel=channel)
@@ -232,6 +242,42 @@ class Application:
                 content=content, expected_current_revision_id=expected_current_revision_id,
                 origin="manual_ui", change_type="manual_edit", evidence_source_kind="manual",
                 evidence_source_ref=json.dumps(ref))
+
+    def _set_memory_trashed(self, agent_id, app_id, card_id, expected_current_revision_id, channel, scope,
+                            expected_trash_version, *, trashed):
+        if any(type(value) is not int for value in (card_id, expected_current_revision_id, expected_trash_version)):
+            raise ValueError("卡片 ID、修订 ID 和回收站版本须为整数")
+        path = self.memory_path(agent_id, app_id, channel, scope=scope)
+        with self._memory_transaction(agent_id, app_id, channel, scope, path) as db:
+            require_card(db, card_id, agent_id, app_id, channel, scope)
+            if not _has_trash_metadata(db):
+                db.execute("ALTER TABLE cards ADD COLUMN trash_version INTEGER NOT NULL DEFAULT 0")
+                db.execute("ALTER TABLE cards ADD COLUMN status_before_trash TEXT")
+            status, revision, version, previous = db.execute(
+                "SELECT status,current_revision_id,trash_version,status_before_trash FROM cards WHERE id=?",
+                (card_id,)).fetchone()
+            if revision != expected_current_revision_id:
+                raise RevisionConflict(expected_current_revision_id, revision)
+            changed = (status == "trashed") != trashed
+            if changed:
+                # 状态变化不动正文修订或扩展的基准；另核版本以拒绝恢复后迟到的删除。
+                if expected_trash_version != version:
+                    raise ValueError(f"expected trash version {expected_trash_version}, current version is {version}")
+                new_status = "trashed" if trashed else (previous if version else "fresh")
+                version += 1
+                db.execute("UPDATE cards SET status=?,status_before_trash=?,trash_version=? WHERE id=?",
+                           (new_status, status if trashed else None, version, card_id))
+            return dict(card_id=card_id, current_revision_id=revision, trash_version=version, changed=changed)
+
+    def trash_memory(self, agent_id, app_id, card_id, expected_current_revision_id, channel="main", *,
+                     scope=SOURCE, expected_trash_version=0):
+        return self._set_memory_trashed(agent_id, app_id, card_id, expected_current_revision_id, channel,
+                                       scope, expected_trash_version, trashed=True)
+
+    def restore_memory(self, agent_id, app_id, card_id, expected_current_revision_id, channel="main", *,
+                       scope=SOURCE, expected_trash_version=0):
+        return self._set_memory_trashed(agent_id, app_id, card_id, expected_current_revision_id, channel,
+                                       scope, expected_trash_version, trashed=False)
 
     def evidence(self, agent_id, app_id, card_id, channel="main", *, limit=20, offset=0, scope=SOURCE):
         self.page(limit, offset)

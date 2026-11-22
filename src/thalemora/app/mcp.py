@@ -24,9 +24,10 @@ def create_mcp(service):
 
     @server.tool()
     def memory(agent_id: str, app_id: str | None = None, channel: str = "main", limit: int = 20,
-               offset: int = 0, scope: Literal["source-scoped", "owner-global"] = "source-scoped") -> list:
-        """默认按授权来源分页；owner-global 显式管理该 Agent 当前通道全部来源，scope 不是身份凭据。"""
-        return service.memory(agent_id, app_id, channel, limit=limit, offset=offset, scope=scope)
+               offset: int = 0, scope: Literal["source-scoped", "owner-global"] = "source-scoped",
+               view: Literal["normal", "trash"] = "normal") -> list:
+        """按授权来源分页。view=trash 查看回收站，owner-global 管理该 Agent 当前通道全部来源。"""
+        return service.memory(agent_id, app_id, channel, limit=limit, offset=offset, scope=scope, view=view)
 
     @server.tool()
     def evidence(agent_id: str, app_id: str | None, card_id: int, channel: str = "main", limit: int = 20,
@@ -56,5 +57,21 @@ def create_mcp(service):
         """同事务核范围及 CAS 的人工修订；owner-global 不改变卡归属，不充当 Agent 作者。"""
         return service.revise_memory(agent_id, app_id, card_id, content,
                                      expected_current_revision_id, channel, scope=scope)
+
+    @server.tool()
+    def trash_memory(agent_id: str, app_id: str | None, card_id: int, expected_current_revision_id: int,
+                     channel: str = "main", scope: Literal["source-scoped", "owner-global"] = "source-scoped",
+                     expected_trash_version: int = 0) -> dict:
+        """把卡片移入回收站，保留证据。传入 memory 返回的 current_revision_id 与 trash_version。"""
+        return service.trash_memory(agent_id, app_id, card_id, expected_current_revision_id, channel,
+                                    scope=scope, expected_trash_version=expected_trash_version)
+
+    @server.tool()
+    def restore_memory(agent_id: str, app_id: str | None, card_id: int, expected_current_revision_id: int,
+                       channel: str = "main", scope: Literal["source-scoped", "owner-global"] = "source-scoped",
+                       expected_trash_version: int = 0) -> dict:
+        """恢复卡片原状态。传入删除回执或回收站条目的 current_revision_id 与 trash_version。"""
+        return service.restore_memory(agent_id, app_id, card_id, expected_current_revision_id, channel,
+                                      scope=scope, expected_trash_version=expected_trash_version)
 
     return server

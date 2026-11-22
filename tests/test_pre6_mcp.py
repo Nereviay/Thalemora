@@ -26,7 +26,7 @@ from thalemora.memory.field_sources import get, mark
 
 TOKEN = "synthetic-pre6-owner-token"
 TOOLS = {"list_agents", "search", "history", "inner_state", "memory", "evidence",
-         "import_history", "remember", "revise_memory"}
+         "import_history", "remember", "revise_memory", "trash_memory", "restore_memory"}
 
 
 def run_http(root, listener):
@@ -84,7 +84,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / "state"
         self.service = Application(self.root)
-        self.agent = self.service.register_agent("合成 Agent")['agent_id']
+        self.agent = self.service.register_agent("合成 Agent A")['agent_id']
         self.app = "synthetic-app"
         self.service.grant_source(self.agent, self.app)
         self.domain = dict(agent_id=self.agent, app_id=self.app, channel="main")
@@ -99,7 +99,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         data = reply.structuredContent
         if data is None:
             values = [json.loads(item.text) for item in reply.content]
-            return values[0] if name in {"remember", "revise_memory"} else values
+            return values[0] if name in {"remember", "revise_memory", "trash_memory", "restore_memory"} else values
         return data["result"] if set(data) == {"result"} else data
 
     async def error(self, session, name, args, message):
@@ -195,8 +195,8 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
 
     async def scope_wire(self, session, a, b):
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-        self.assertEqual(set(tools), TOOLS)  # 不增工具
-        for name in ("memory", "evidence", "revise_memory"):
+        self.assertEqual(set(tools), TOOLS)
+        for name in ("memory", "evidence", "revise_memory", "trash_memory", "restore_memory"):
             schema = tools[name].inputSchema["properties"]["scope"]
             self.assertEqual(schema["enum"], ["source-scoped", "owner-global"])
             self.assertEqual(schema["default"], "source-scoped")
@@ -214,6 +214,73 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         proof = await self.call(session, "evidence", dict(agent_id=self.agent, app_id=None, scope="owner-global", card_id=b["card_id"]))
         self.assertEqual(json.loads(proof[-1]["source_ref"])["app"], "other-app")
         self.assertEqual(changed["current_revision_id"], proof[-1]["revision_id"])
+        await self.trash_wire(session, a, b)
+
+    async def trash_wire(self, session, a, b):
+        # 同一 owner 的两个 Agent、同一 Agent 的两个通道，都能产生相同的局部卡 ID。
+        agent_b = self.service.register_agent("合成 Agent B")["agent_id"]
+        domain_b = dict(agent_id=agent_b, app_id="source-b", channel="main")
+        private = dict(self.domain, channel="private")
+        for domain in (domain_b, private):
+            self.service.grant_source(**domain)
+            event = dict(self.event, app=domain["app_id"], channel=domain["channel"], text="合成独立档案")
+            await self.call(session, "import_history", dict(domain, events=[event]))
+            isolated = await self.call(session, "remember", dict(domain, source_event_id="event-1"))
+            self.assertEqual(isolated["card_id"], a["card_id"])
+
+        args = dict(card_id=a["card_id"], expected_current_revision_id=a["current_revision_id"])
+        for name, extra in (("memory", {}), ("evidence", {"card_id": a["card_id"]}),
+                            ("revise_memory", dict(args, content="合成修订")),
+                            ("trash_memory", args), ("restore_memory", args)):
+            await self.error(session, name, dict(self.domain, agent_id=agent_b, **extra), "授权")
+        for name in ("trash_memory", "restore_memory"):
+            await self.error(session, name, dict(self.domain, card_id=b["card_id"],
+                             expected_current_revision_id=-1), "card_outside_scope")
+
+        target = dict(self.domain, **args)
+        proof_args = dict(self.domain, card_id=a["card_id"])
+        original_proof = await self.call(session, "evidence", proof_args)
+        self.assertEqual([r["id"] for r in self.service.recall_for_turn(**self.domain, query="旅行")["memories"]],
+                         [a["card_id"]])
+        await self.error(session, "trash_memory", dict(target, expected_current_revision_id=-1), "expected revision")
+        removed = await self.call(session, "trash_memory", target)
+        self.assertTrue(removed["changed"])
+        self.assertEqual(await self.call(session, "trash_memory", target), dict(removed, changed=False))
+        self.assertEqual(await self.call(session, "memory", self.domain), [])
+        self.assertEqual(self.service.recall_for_turn(**self.domain, query="旅行")["memories"], [])
+        self.assertEqual(await self.call(session, "evidence", proof_args), original_proof)
+        await self.error(session, "revise_memory", dict(target, content="合成修改"), "先恢复")
+        for domain in (domain_b, private):
+            self.assertEqual((await self.call(session, "memory", domain))[0]["content"], "合成独立档案")
+            self.assertEqual(await self.call(session, "memory", dict(domain, view="trash")), [])
+        self.assertEqual(await self.call(session, "memory", dict(self.domain, app_id="other-app", view="trash")), [])
+        owner = dict(agent_id=self.agent, app_id=None, scope="owner-global")
+        trash = await self.call(session, "memory", dict(owner, view="trash"))
+        self.assertEqual([r["id"] for r in trash], [a["card_id"]])
+        restore = dict(owner, **args, expected_trash_version=trash[0]["trash_version"])
+        await self.error(session, "restore_memory", dict(restore, expected_current_revision_id=-1), "expected revision")
+        restored = await self.call(session, "restore_memory", restore)
+        self.assertTrue(restored["changed"])
+        self.assertEqual(await self.call(session, "restore_memory", restore), dict(restored, changed=False))
+        await self.error(session, "trash_memory", target, "expected trash version")
+        self.assertEqual((await self.call(session, "memory", self.domain))[0]["trash_version"], restored["trash_version"])
+        self.assertEqual([r["id"] for r in self.service.recall_for_turn(**self.domain, query="旅行")["memories"]],
+                         [a["card_id"]])
+        self.assertEqual(await self.call(session, "evidence", proof_args), original_proof)
+
+    def test_restore_preserves_lifecycle_status_and_handles_legacy_trash(self):
+        a, b = self.scope_fixture()
+        path = self.service.memory_path(self.agent, self.app)
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("UPDATE cards SET status='sunk' WHERE id=?", (a["card_id"],))
+            db.execute("UPDATE cards SET status='trashed' WHERE id=?", (b["card_id"],))
+        owner = dict(agent_id=self.agent, app_id=None, scope="owner-global")
+        args = dict(owner, card_id=a["card_id"], expected_current_revision_id=a["current_revision_id"])
+        receipt = self.service.trash_memory(**args)
+        self.service.restore_memory(**args, expected_trash_version=receipt["trash_version"])
+        self.service.restore_memory(**owner, card_id=b["card_id"], expected_current_revision_id=b["current_revision_id"])
+        with closing(sqlite3.connect(path)) as db:
+            self.assertEqual(db.execute("SELECT status FROM cards ORDER BY id").fetchall(), [("sunk",), ("fresh",)])
 
     async def test_f5_mounted_http_and_mcp_scope_contract(self):
         a, b = self.scope_fixture()
@@ -284,6 +351,10 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                          ("import_history", {"events": [dict(self.event, app=domain["app_id"], channel=domain["channel"])]})]
                 for name, args in cases:
                     await self.error(session, name, dict(domain, **args), "Agent" if domain["agent_id"] != self.agent else "授权")
+            for scope in ("owner-global", "source-scoped"):
+                for name in ("trash_memory", "restore_memory"):
+                    await self.error(session, name, dict(self.domain, agent_id=foreign.agent_id, scope=scope,
+                                     card_id=saved["card_id"], expected_current_revision_id=-1), "Agent")
             await self.error(session, "import_history", dict(self.domain, events=[dict(self.event, app="other")]), "一致")
             await self.error(session, "import_history", {"agent_id": self.agent, "app_id": self.app, "events": [self.event]}, "channel")
             self.assertEqual(self.service.memory(self.agent, self.app)[0]["current_revision_id"], saved["current_revision_id"])

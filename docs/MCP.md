@@ -36,10 +36,20 @@ thalemora --data ./state serve
 | `import_history` | 导入已授权来源的聊天记录。 |
 | `remember` | 将一条已导入原话保存为人工记忆。 |
 | `revise_memory` | 明确修改一条人工记忆。 |
+| `trash_memory` | 把记忆移入回收站，保留卡片、修订和来源证据。 |
+| `restore_memory` | 将回收站中的记忆恢复到移入前的状态。 |
 
 先在管理台注册 AI、授权来源。工具调用仍需正确的 Agent ID、来源和通道。私人通道不会自动继承普通通道权限。
 
-`memory`、`evidence`、`revise_memory` 默认 `scope="source-scoped"`，只读改指定应用来源的卡片，外域/未知归属 ID 拒绝且不泄漏当前修订。管理员需跨来源时显式传 `scope="owner-global"`，仍只限该 Agent 与通道；`memory` 可省略 app_id，证据/修订可传 `app_id: null`。未知 scope 拒绝。scope 不是身份凭据，不可用它升级专用召回凭据；stdio 只交给可信宿主。owner 修改保留卡片原应用归属，不因编辑认领旧卡。`remember` 始终从明确授权来源创建卡片。见[范围说明](USAGE.md#查看范围应用来源与管理员)。
+`memory`、`evidence`、`revise_memory`、`trash_memory`、`restore_memory` 默认使用 `scope="source-scoped"`，按 Agent、应用和通道检查卡片归属。管理员可显式传 `scope="owner-global"` 管理所选 Agent 当前通道的全部来源，此时 `app_id` 可传 `null`。同一实例的管理密钥可以选择该 owner 的其他 Agent。给单个 AI 接入共享实例时，应由可信宿主持有管理密钥并固定该 AI 的 Agent ID、应用、通道和来源范围。`remember` 始终从已授权来源创建卡片。见[范围说明](USAGE.md#查看范围应用来源与管理员)。
+
+### 删除与恢复
+
+1. 用 `memory` 读取卡片，将 `id`、`current_revision_id`、`trash_version` 分别作为 `card_id`、`expected_current_revision_id`、`expected_trash_version` 传给 `trash_memory`。
+2. 删除后，普通记忆列表和记忆召回会跳过该卡。用相同范围调用 `memory(view="trash")` 可重新找到它，`evidence` 仍可查原有修订证据。
+3. 用回收站条目或删除回执中的两个版本值调用 `restore_memory`。恢复后再次按原状态展示和召回。旧库中已在回收站且没有原状态记录的卡恢复为 `fresh`。
+
+每次实际移入或恢复只增加 `trash_version`，正文修订 ID 保持原值。版本冲突时请重读卡片。正文版本匹配且卡片已在目标状态时，重复调用返回 `changed=false`。
 
 ## 本机 stdio
 
