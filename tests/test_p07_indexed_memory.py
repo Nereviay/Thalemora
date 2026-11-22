@@ -36,6 +36,34 @@ class IndexedMemoryTests(unittest.TestCase):
         self.assertEqual([], self.app.recall_for_turn('chenlin', 'niannian', query)['memories'])
         self.assertEqual(1, len(self.recall()['memories']))
 
+    def test_host_short_chat_requires_a_topic_for_related_memory(self):
+        from thalemora.adapters.niannian_vnext import recall_vnext
+
+        project = self.card(text='做完合成演示后好累，散步回家')
+        move = self.card(text='搬家时提过讨厌纸箱的气味')
+        with closing(sqlite3.connect(self.memory)) as db, db:
+            db.executemany('UPDATE cards SET title=?, keywords=? WHERE id=?', [
+                ('念念演示', '', project['card_id']),
+                ('讨厌的纸箱气味', '纸箱，搬家，讨厌', move['card_id']),
+            ])
+        self.archive.import_history([dict(app='niannian', channel='main',
+            source_event_id='old:demo', version=1, role='user', text='演示之后好累')])
+        self.indexed()
+        for query, expected in (('好累', None), ('讨厌你哦', None), ('散步', None),
+                                ('念念', project), ('搬家', move)):
+            with self.subTest(query=query):
+                result = recall_vnext(self.app, 'chenlin', 'niannian', dict(user_text=query))
+                refs = result['trace']['related']['memory_refs']
+                self.assertEqual([dict(card_id=expected['card_id'],
+                    revision_id=expected['current_revision_id'])] if expected else [], refs)
+                self.assertEqual([], result['trace']['archive'])
+                if expected is None:
+                    self.assertEqual('', result['rendered'])
+        history = recall_vnext(self.app, 'chenlin', 'niannian', dict(user_text='好累的原话是什么？'))
+        self.assertEqual(['old:demo'], [a['id'] for a in history['trace']['archive']])
+        self.assertEqual([project['card_id']],
+                         [r['card_id'] for r in history['trace']['related']['memory_refs']])
+
     def test_host_raw_history_rejects_single_generic_term_match(self):
         # 合成复现：问广告投放，却误召回只包含「平台」的旧账号申诉。
         self.archive.import_history([dict(
@@ -136,6 +164,7 @@ class IndexedMemoryTests(unittest.TestCase):
     def test_host_intent_archive_does_not_require_history_cue(self):
         from thalemora.adapters.niannian_vnext import recall_vnext
 
+        card = self.card(text='合成记录提到青岚工程使用 edit_file 的预览流程')
         self.archive.import_history([dict(
             app='niannian', channel='main', source_event_id='old:rule',
             version=1, role='assistant', text='青岚工程原始约定 edit_file',
@@ -152,6 +181,7 @@ class IndexedMemoryTests(unittest.TestCase):
                     surface=surface, raw_to_archive={},
                     preaction_context={'needs_precheck': True})
                 self.assertEqual(['old:rule'], [a['id'] for a in result['trace']['archive']])
+                self.assertEqual([card['card_id']], [m['id'] for m in result['trace']['memories']])
 
     def test_host_local_vectors_reuse_existing_model_identity(self):
         import numpy as np
@@ -178,6 +208,8 @@ class IndexedMemoryTests(unittest.TestCase):
         result = self.recall()
         self.assertEqual([row['id'] for row in result['memories']], [card['card_id']])
         self.assertFalse(result['memories'][0]['verified'])
+        # 所有合成向量完全相同；单凭余弦满分不能给短句注入无关旧卡。
+        self.assertEqual([], self.app.recall_for_turn('chenlin', 'niannian', '搬家')['memories'])
         self.assertEqual(self.providers.audit(), [])
 
     def test_host_ambient_uses_verified_cards_and_existing_reflection_signals(self):

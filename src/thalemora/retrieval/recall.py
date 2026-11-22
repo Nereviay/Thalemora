@@ -27,6 +27,16 @@ def query_terms(query):
     return list(dict.fromkeys(t for t in tokenize(query) if t not in STOP))[:12]
 
 
+def _row_keywords(row):
+    keywords = row['provenance'].get('keywords') or ''
+    if isinstance(keywords, str):
+        try:
+            keywords = json.loads(keywords)
+        except ValueError:
+            keywords = re.split(r"[,，、;；\s]+", keywords)
+    return keywords if isinstance(keywords, list) else []
+
+
 def normalized(text):
     return re.sub(r"\W+", "", text.lower())
 
@@ -364,6 +374,28 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
     pool = []
     asks_history = any(cue in query for cue in
                        ('之前', '以前', '上次', '那次', '当时', '还记得', '记不记得', '曾经'))
+    # 宿主 normal 仅在追溯历史时查 Archive；意图召回由宿主传入数量上限。
+    archive_allowed = (indexed_memory_rows is None or bounded or asks_history
+                       or '原话' in query
+                       or bool(re.search(r'(?:说过|提过).{0,8}(?:什么|啥|哪)', query))
+                       or bool(re.search(r'(?:昨天|前天|刚才|那天).{0,32}(?:聊|谈|说|提|讲)'
+                                         r'.{0,40}(?:什么|啥|哪|怎么|谁|呢)', query)))
+    generic = STOP | set("东西 这个 那个 这些 那些 事情 生活 工作 学习 游戏 音乐 电影 朋友 家人 喜欢 讨厌 今天 昨天 明天 最近 时间 地点 人物 活动 记忆 聊天 用户 助手 心情 感觉 关系 问题 内容 信息 记录 日常 兴趣 爱好 经历 计划 目标 偏好".split())
+    short_chat = not archive_allowed and len(normalized(query)) <= 12
+    topic_terms = {t for t in terms if len(t) >= 2 and t not in generic}
+
+    def has_chat_topic(row):
+        if not short_chat:
+            return True
+        first_line = row['text'].partition('\n')[0]
+        # 无标题旧卡保留以完整复合主题开头的召回，正文零散命中不足以选卡。
+        if len(topic_terms) >= 2 and first_line.lower().startswith(query.strip().lower()):
+            return True
+        if row['title'] and not topic_terms.isdisjoint(tokenize(first_line)):
+            return True
+        return not topic_terms.isdisjoint(k.strip().lower() for k in _row_keywords(row)
+                                          if isinstance(k, str))
+
     for item in candidates:
         row = current.get(item['source_key'])
         if row is None or item["text"] != row["text"] or item["provenance"]["revision_id"] != row["provenance"]["revision_id"]:
@@ -376,7 +408,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
         # 非宿主独立召回保持原有词面规则。
         lexical_allowed = lexical >= 0.5 if indexed_memory_rows is not None else bool(lexical)
         semantic_floor = 0.59 if indexed_memory_rows is not None and asks_history else 0.65
-        if lexical_allowed or cosine >= semantic_floor:
+        if (lexical_allowed or cosine >= semantic_floor) and has_chat_topic(row):
             memory = dict(kind='memory', id=row['source_id'], text=row['text'],
                           source_key=row['source_key'], revision_id=row['provenance']['revision_id'],
                           score=max(lexical, cosine))
@@ -385,21 +417,12 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                                ('extension_id', 'base_revision_id', 'evidence_refs')})
             pool.append(memory)
     # 用户明确提到的唯一非泛化旧关键词可补候选；语义解释仍交宿主聊天模型。
-    generic = STOP | set("东西 这个 那个 这些 那些 事情 生活 工作 学习 游戏 音乐 电影 朋友 家人 喜欢 讨厌 今天 昨天 明天 最近 时间 地点 人物 活动 记忆 聊天 用户 助手 心情 感觉 关系 问题 内容 信息 记录 日常 兴趣 爱好 经历 计划 目标 偏好".split())
     # 有界索引候选不代表整库，不能据此推断关键词在授权全库中唯一。
     keyword_rows = {}
     for row in rows:
         if 'extension_id' in row['provenance'] or row['status'] in {'trashed', 'archived', 'retired'}:
             continue
-        keywords = row['provenance'].get('keywords') or ''
-        if isinstance(keywords, str):
-            try:
-                keywords = json.loads(keywords)
-            except ValueError:
-                keywords = re.split(r"[,，、;；\s]+", keywords)
-        if not isinstance(keywords, list):
-            continue
-        for keyword in set(k.lower().strip() for k in keywords if isinstance(k, str)):
+        for keyword in set(k.lower().strip() for k in _row_keywords(row) if isinstance(k, str)):
             if len(keyword) < 2 or keyword in generic:
                 continue
             if re.search(r'(?<![a-z0-9_])' + re.escape(keyword) + r'(?![a-z0-9_])', query.lower()):
@@ -417,12 +440,6 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                          source_key=row['source_key'],
                          revision_id=row['provenance']['revision_id'], score=1.0))
     raw = {}
-    # 宿主 normal 仅在明确追溯历史时查 Archive；有界意图检索与独立产品保持原规则。
-    archive_allowed = (indexed_memory_rows is None or bounded or asks_history
-                       or '原话' in query
-                       or bool(re.search(r'(?:说过|提过).{0,8}(?:什么|啥|哪)', query))
-                       or bool(re.search(r'(?:昨天|前天|刚才|那天).{0,32}(?:聊|谈|说|提|讲)'
-                                         r'.{0,40}(?:什么|啥|哪|怎么|谁|呢)', query)))
     for term in terms if archive_allowed else ():
         for row in application.search(agent_id, app_id, term, channel, limit=12):
             raw[row["source_event_id"]] = row
@@ -451,20 +468,13 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                 application.providers.local_errors["rerank"] = type(exc).__name__
             result["errors"].append(dict(module="rerank", error=str(exc)))
     # M04：只在普通 Related 完全无候选时，用已核验正式卡片的精确关键词兜底。
-    generic = STOP | set("东西 这个 那个 这些 那些 事情 生活 工作 学习 游戏 音乐 电影 朋友 家人 喜欢 讨厌 今天 昨天 明天 最近 时间 地点 人物 活动 记忆 聊天 用户 助手 心情 感觉 关系 问题 内容 信息 记录 日常 兴趣 爱好 经历 计划 目标 偏好".split())
     if indexed_memory_rows is None and not pool and re.fullmatch(r"[\u4e00-\u9fff]{2}", query) and query not in generic:
         matches = []
         for row in rows:
             provenance = row['provenance']
             if 'extension_id' in provenance or row['status'] in {'trashed', 'archived', 'retired'}:
                 continue
-            keywords = provenance.get('keywords') or ''
-            if isinstance(keywords, str):
-                try:
-                    keywords = json.loads(keywords)
-                except ValueError:
-                    keywords = re.split(r"[,，、;；\s]+", keywords)
-            if isinstance(keywords, list) and query in keywords:
+            if query in _row_keywords(row):
                 matches.append(row)
         # 先判断整个授权范围内的唯一性，不能过滤已见卡后制造唯一候选。
         if len(matches) == 1:
@@ -487,6 +497,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                     if (row and row['text'] == item['text']
                             and row['provenance']['revision_id'] == item['revision_id']
                             and row['provenance'].get('extension_id') == item.get('extension_id')
+                            and has_chat_topic(row)
                             and (indexed_memory_rows is None or not any(
                                 key[3] in seen_raw for key in refs.get(row['source_key'], ())))):
                         if 'extension_id' in item:
