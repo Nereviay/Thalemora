@@ -1,14 +1,16 @@
 # 更新记录
 
-## 0.9.0rc1（本地待发候选，尚未发布）
+## v0.9.0
 
 - 新增公共记忆选择，结合话题、短句上文、事实变化和原话语境提供回忆；保留当前修订与来源证据，便于回查。
 - 为主动联系、寻找活动和行动前核对提供记忆材料；工具的拦截、批准与执行仍由聊天应用负责。
 - 可信宿主可接入自然浮现和余韵，并复用已有反思、激活信号；触发和最终消息拼接由宿主控制。
+- 收紧普通短句与历史原话的相关性判断，减少泛词碰巧重合时带出不相干旧记忆的情况。
+- 有可信原话证据的持续事项可附加进行中、更新、结束状态，沿用原有修订与来源核验；需要宿主接线，不自动追踪所有聊天。
 
 仅具备主动调用条件的客户端或开发者可接入新能力。既有 SillyTavern / Operit 插件没有自动升级到新宿主能力，新聊天同步仍需单独接线。完整模型回复的 Token、费用及延迟请在接入方的真实聊天环境中观察。
 
-当前可下载正式版仍为 [v0.8.1](https://github.com/Nereviay/Thalemora/releases/tag/v0.8.1)。
+下载 [v0.9.0](https://github.com/Nereviay/Thalemora/releases/tag/v0.9.0)，安装和升级步骤见[新手指南](GETTING_STARTED.md)与[维护说明](MAINTENANCE.md)。
 
 ## v0.8.1
 
@@ -59,4 +61,4 @@
 - 支持记忆来源与修订、水系组织、数据备份和恢复。
 - 提供四项 stdio MCP 读取工具。
 
-旧版源代码和下载文件保留在 [GitHub Releases](https://github.com/Nereviay/Thalemora/releases)。安装与插件教程以当前正式版 v0.8.1 为准；候选新能力见[应用接入](INTEGRATION.md)。
+旧版源代码和下载文件保留在 [GitHub Releases](https://github.com/Nereviay/Thalemora/releases)。安装与插件教程以当前正式版 v0.9.0 为准；新能力的接入条件见[应用接入](INTEGRATION.md)。

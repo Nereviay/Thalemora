@@ -7,17 +7,19 @@
 洄海（Thalemora）是一套**独立、开源、可自行部署的 AI 长期记忆系统**。<br>
 保存聊天原话，整理值得记住的事情，让已连接的聊天应用在需要时找回相关经历。
 
-[开始使用](docs/GETTING_STARTED.md) · [安装插件](docs/PLUGIN_SETUP.md) · [下载 v0.8.1](https://github.com/Nereviay/Thalemora/releases/tag/v0.8.1) · [使用文档](docs/README.md)
+[开始使用](docs/GETTING_STARTED.md) · [安装插件](docs/PLUGIN_SETUP.md) · [下载 v0.9.0](https://github.com/Nereviay/Thalemora/releases/tag/v0.9.0) · [使用文档](docs/README.md)
 
 </div>
 
-## 下一版候选：0.9.0rc1（尚未发布）
+## v0.9.0：让回忆更贴近当前话题
 
-当前可下载正式版仍为 **v0.8.1**。本地候选新增公共记忆选择：结合当前话题、原话和有效修订选取回忆，也可为主动联系、寻找活动和行动前核对提供记忆材料；来源与版本保留，便于追溯证据。
+本版新增公共记忆选择：结合当前话题、原话和有效修订选取回忆，也可为主动联系、寻找活动和行动前核对提供记忆材料；来源与版本保留，便于追溯证据。
 
 可信宿主还可接入「自然浮现」与「余韵」：在合适时机带出一段经历，并让刚提起的记忆短暂延续；具体何时触发、怎样加入聊天，由宿主控制。
 
-**新能力仅供具备主动调用条件的客户端或开发者接入。既有 SillyTavern / Operit 插件没有自动升级到新宿主能力；新聊天同步仍需单独接线。** 接入条件见[应用接入](docs/INTEGRATION.md)。
+对有可靠原话证据的持续事项，接入方还能记录「进行中、更新、结束」状态，避免新进展和旧结论并列。这需要客户端或后台整理流程提供真实来源，不代表洄海会自动理解所有聊天并跟踪每件事。
+
+**这些新增能力需要客户端主动调用相应接口并传入可信上下文。现有 SillyTavern / Operit 插件继续提供聊天前召回，不会自动获得全部新能力；新聊天同步仍需单独接线。** 接入条件见[应用接入](docs/INTEGRATION.md)。
 
 ## 为什么做洄海？
 
@@ -73,7 +75,7 @@
 需要 Python 3.10 或更新版本。
 
 ```bash
-git clone --depth 1 --branch v0.8.1 https://github.com/Nereviay/Thalemora.git
+git clone --depth 1 --branch v0.9.0 https://github.com/Nereviay/Thalemora.git
 cd Thalemora
 python3 -m venv .venv
 ./.venv/bin/python -m pip install -c requirements.lock .
