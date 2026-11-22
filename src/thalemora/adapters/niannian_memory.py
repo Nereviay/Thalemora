@@ -10,7 +10,8 @@ InvalidGateDecision = core.InvalidGateDecision
 
 class NiannianGatekeeper:
     def __init__(self, *, memory_db, ops_db, raw_db, profile, provider,
-                 frozen_candidates, embedding_provider=None, embedding_model=None):
+                 frozen_candidates, embedding_provider=None, embedding_model=None,
+                 current_public_user_text=None):
         self.memory_db = memory_db
         self.ops_db = ops_db
         self.raw_db = raw_db
@@ -19,6 +20,7 @@ class NiannianGatekeeper:
         self.frozen_candidates = frozen_candidates
         self.embedding_provider = embedding_provider
         self.embedding_model = embedding_model
+        self.current_public_user_text = current_public_user_text
 
     def apply_candidate(self, candidate_id, *, ops_db_path=None, memory_db_path=None,
                         frozen_map=None, provider=None, embedding_provider=None):
@@ -29,6 +31,7 @@ class NiannianGatekeeper:
             provider=provider or self.provider,
             embedding_provider=embedding_provider or self.embedding_provider,
             embedding_model=self.embedding_model,
+            current_public_user_text=self.current_public_user_text,
         )
 
     def apply(self, new_info, title=None, keywords="", source="chenlin", *,

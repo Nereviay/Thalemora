@@ -7,9 +7,10 @@ import hashlib
 import json
 import re
 import sqlite3
+from contextlib import closing
 from functools import partial
 
-from thalemora.memory import revision_store, evidence_resolver
+from thalemora.memory import revision_store, evidence_resolver, event_state
 from . import keywords as keyword_policy
 from . import ops as ops_store
 
@@ -21,6 +22,12 @@ SYSTEM = """按候选事实及冻结卡片决定 new/extend/correct/supersede/dr
 read_only=true 的卡是人工权威，仍须参与同一记忆判断；同一事实的重复、补充或冲突一律 drop 并说明人工只读原因，不得改写或另建平行卡。new 只用于与已有卡不同的独立事实。
 保留来源、否定、时间及不确定性，不编造事实。"""
 SCENE_NEW_CARD_RULES = "Scene 新卡须明确通过三十天长期价值判断 long_term_value；用户明确偏好及约定须保留。"
+EVENT_STATE_RULES = (
+    "本候选的 content 是完整用户原话。只在原话明确陈述同一现实事项的当前进展时，"
+    "返回 confirmed_event_state (ongoing=正在进行，update=已发生变化，closed=已经结束)，"
+    "并在 event_state_basis 逐字引用表达该项进展的原话。否定、假设、计划、转述、"
+    "过去状态、多个事项混杂或仅凭冻结卡推测时，两项都返回 null。"
+)
 RELATION_RECHECK_SYSTEM = SYSTEM + "本次只复核明确纠正候选与冻结旧卡是否同一记忆。"
 MAINTENANCE_SYSTEM = "只依据原文提出整理稿及缺失元数据、现有 Stream 路由；遵守输入作者与叙述者，不编造事实或行动。原文始终是唯一事实权威。返回 JSON 字段 organized_content,title,keywords,importance,tags,water_stream_id,water_reason。fill_fields 之外的元数据返回 null；needs_organized_content=false 时整理稿返回 null；needs_water=false 时路由返回 null。importance 为 1–10，tags 仅选我们/你/我/项目/规则/生活/心情/日子/未分类；Stream 仅从输入 active_streams 选择，无合适位置返回 null。"
 
@@ -191,7 +198,8 @@ def _guard_future_plan_decision(decision, core, frozen_map):
             guarded["reason"] = "future_plan_kept_separate"
     return guarded
 
-def _parse_decision(raw, frozen_map, fallback_content, *, fallback_importance=None):
+def _parse_decision(raw, frozen_map, fallback_content, *, fallback_importance=None,
+                    verify_event_state=False):
     try:
         decision = raw if isinstance(raw, dict) else json.loads(raw)
     except Exception as exc:
@@ -265,6 +273,9 @@ def _parse_decision(raw, frozen_map, fallback_content, *, fallback_importance=No
 
     if action in UPDATE_ACTIONS and frozen_by_id[target_id].get("read_only"):
         parsed.update(action="drop", target_card_id=None, reason="manual_memory_read_only")
+    if verify_event_state:
+        parsed["confirmed_event_state"] = decision.get("confirmed_event_state")
+        parsed["event_state_basis"] = decision.get("event_state_basis")
     return parsed
 
 def _guard_same_memory_update(decision, core):
@@ -298,12 +309,14 @@ def _relation_recheck(core, frozen_map, provider, *, fallback_importance=None):
         sort_keys=True,
     )
     raw = (provider or _provider_required)([
-        {"role": "system", "content": RELATION_RECHECK_SYSTEM},
+        {"role": "system", "content": RELATION_RECHECK_SYSTEM
+         + (EVENT_STATE_RULES if core.get("verify_event_state") else "")},
         {"role": "user", "content": prompt},
     ])
     decision = _parse_decision(
         raw, frozen_map, core.get("content") or "",
         fallback_importance=fallback_importance,
+        verify_event_state=core.get("verify_event_state", False),
     )
     decision = _guard_same_memory_update(decision, core)
     if decision["action"] in {"extend", "correct", "supersede"} or decision["reason"] == "manual_memory_read_only":
@@ -330,8 +343,8 @@ def decide(core, frozen_map=None, provider=None):
     try:
         raw = (provider or _provider_required)([
             {"role": "system", "content": (
-                SYSTEM + SCENE_NEW_CARD_RULES if "memory_type" in core
-                else SYSTEM
+                SYSTEM + (SCENE_NEW_CARD_RULES if "memory_type" in core else "")
+                + (EVENT_STATE_RULES if core.get("verify_event_state") else "")
             )},
             {"role": "user", "content": prompt},
         ])
@@ -339,7 +352,8 @@ def decide(core, frozen_map=None, provider=None):
         raise
     except Exception as exc:
         raise GatekeeperUnavailable(str(exc)) from exc
-    decision = _parse_decision(raw, ordered, core.get("content") or "")
+    decision = _parse_decision(raw, ordered, core.get("content") or "",
+                               verify_event_state=core.get("verify_event_state", False))
     protected_user_boundary = (
         "memory_type" in core
         and core.get("memory_type") in {"preference", "agreement"}
@@ -394,7 +408,8 @@ def _csv_union(old_value, new_value, *, title="", tags=""):
 def _commit(decision, core, frozen_map, *, memory_db_path, candidate_id,
             source, origin, evidence_source_kind, evidence_source_ref,
             evidence_rows=None, embedding_provider=None, embedding_model=None,
-            connection=None, agent_source="agent", agent_field_source="agent_explicit"):
+            connection=None, agent_source="agent", agent_field_source="agent_explicit",
+            force_revision=False):
     create_card = (partial(revision_store.create_card_in_transaction, connection)
                    if connection is not None else partial(revision_store.create_card, memory_db_path))
     update_card = (partial(revision_store.update_card_in_transaction, connection)
@@ -498,6 +513,7 @@ def _commit(decision, core, frozen_map, *, memory_db_path, candidate_id,
         evidence_rows=evidence_rows,
         candidate_id=candidate_id,
         forbidden_memory_kind="timeline",
+        force_revision=force_revision,
     )
 
 def _core(payload):
@@ -667,9 +683,39 @@ def _extension_storage_unavailable(candidate_id, input_hash, ops_db_path):
         "error": "extension_storage_unavailable",
     }, 200
 
+def _commit_event(decision, core, frozen, *, candidate, payload, input_hash, raw_db_path,
+                  ops_db_path, current_public_user_text, **commit_args):
+    state = payload["event_state"]
+    target = decision["target_card_id"]
+    basis = decision.get("event_state_basis")
+    if (decision.get("confirmed_event_state") != state or not isinstance(basis, str)
+            or not basis.strip() or basis not in core["content"]):
+        raise event_state.EventStateRejected("event_state_unconfirmed")
+    # Existing-card identity comes from Gatekeeper's verified decision, not a Writer guess.
+    requested_card = payload.get("event_card_id")
+    if requested_card is not None and target != requested_card:
+        raise event_state.EventStateRejected("event_state_target_mismatch")
+    evidence = payload["verified_evidence"][0]
+    with closing(revision_store._connect(commit_args["memory_db_path"])) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        event_state.check_write(db, target, evidence["raw_event_start_id"])
+        result = _commit(decision, core, frozen, connection=db, force_revision=True, **commit_args)
+        # Provider/embedding 期间可能撤回。先核实，再落 ops 准入回执，最后提交 Memory。
+        if event_state.verified_quote(evidence, raw_db_path, current_public_user_text) != core["content"]:
+            raise event_state.EventStateRejected("event_state_source_unavailable")
+        ops_store.accept_event_gate(candidate["candidate_id"], candidate["payload_json"], {
+            "gate_input_hash": input_hash, "decision_hash": _stable_hash(decision),
+            "action": decision["action"], "target_card_id": target,
+            "base_revision_id": next((r["current_revision_id"] for r in frozen
+                                      if r["card_id"] == target), None),
+        }, ops_db_path)
+        event_state.mark_new_evidence(db, result, state)
+        return result
+
+
 def apply_candidate(candidate_id, *, ops_db_path, memory_db_path, raw_db_path, profile,
                     frozen_map=None, provider=None, embedding_provider=None, embedding_model=None,
-                    include_read_only=False):
+                    include_read_only=False, current_public_user_text=None):
     memory_path = memory_db_path
     candidate = ops_store.get_candidate(candidate_id, ops_db_path)
     if candidate is None:
@@ -735,6 +781,22 @@ def apply_candidate(candidate_id, *, ops_db_path, memory_db_path, raw_db_path, p
                 "error": "user_fact_requires_user_text_exact"}, 422
 
     core = _core(payload)
+    state = payload.get("event_state")
+    if state is not None:
+        rows = payload["verified_evidence"]
+        target = payload.get("event_card_id")
+        if (state not in event_state.STATES or payload.get("claim_scope") != "user_fact"
+                or len(rows) != 1 or (target is not None and (type(target) is not int or target <= 0))):
+            error = "invalid_event_state_candidate"
+        else:
+            quote = event_state.verified_quote(rows[0], raw_db_path, current_public_user_text)
+            error = None if quote else "event_state_source_unavailable"
+        if error:
+            ops_store.mark_candidate_failed(candidate_id, error, ops_db_path)
+            return {"ok": False, "status": "pending", "retryable": False, "error": error}, 422
+        # 只给 Gate 用户原话，不提供 Writer 对状态的猜测、标题或时间线。
+        core.update(title="", content=quote, keywords=[], happened_at=None, verify_event_state=True)
+        include_read_only = True
     if frozen_map is None:
         try:
             frozen_map = _scene_admission_retrieval_hints(payload, memory_path, include_read_only=include_read_only)
@@ -768,6 +830,8 @@ def apply_candidate(candidate_id, *, ops_db_path, memory_db_path, raw_db_path, p
             candidate_id, freeze_hash, exc, ops_db_path
         )
     input_hash = _scene_gate_input_hash(core, frozen, payload, profile)
+    if state is not None:
+        input_hash = _stable_hash([input_hash, state, target, rows])
     extension_available = revision_store.extension_storage_available(memory_path)
     effective_input_hash = (
         input_hash
@@ -809,7 +873,12 @@ def apply_candidate(candidate_id, *, ops_db_path, memory_db_path, raw_db_path, p
         )
 
     try:
-        committed = _commit(
+        commit = _commit if state is None else partial(
+            _commit_event, candidate=candidate, payload=payload, input_hash=input_hash,
+            raw_db_path=raw_db_path, ops_db_path=ops_db_path,
+            current_public_user_text=current_public_user_text,
+        )
+        committed = commit(
             decision, core, frozen, memory_db_path=memory_path,
             candidate_id=candidate_id, source="auto", origin="auto_writer",
             evidence_source_kind=None,
@@ -817,6 +886,9 @@ def apply_candidate(candidate_id, *, ops_db_path, memory_db_path, raw_db_path, p
             evidence_rows=payload["verified_evidence"],
             embedding_provider=embedding_provider, embedding_model=embedding_model,
         )
+    except event_state.EventStateRejected as exc:
+        ops_store.mark_candidate_failed(candidate_id, str(exc), ops_db_path)
+        return {"ok": False, "status": "pending", "retryable": False, "error": str(exc)}, 422
     except (
         revision_store.InvalidRevisionState,
         revision_store.RevisionConflict,

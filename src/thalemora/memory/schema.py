@@ -3,7 +3,7 @@
 cards 来自静态 schema.sql；修订/证据/extension 来自 migrate_v2.py
 的 _ensure_v2_schema；字段来源由 field_sources.ensure 建立。
 """
-from . import field_sources
+from . import event_state, field_sources
 
 DDL = """
 CREATE TABLE IF NOT EXISTS cards (
@@ -144,3 +144,4 @@ def initialize(connection):
         if statement.strip():
             connection.execute(statement)
     field_sources.ensure(connection)
+    event_state.install(connection)

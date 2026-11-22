@@ -60,6 +60,7 @@ def connect_writer_ops(db_path=None):
             "evidence_attempts": "INTEGER NOT NULL DEFAULT 0",
             "gate_attempts": "INTEGER NOT NULL DEFAULT 0",
             "last_gate_input_hash": "TEXT",
+            "event_gate_receipt": "TEXT",
         }
         for name, ddl in additions.items():
             if name not in columns:
@@ -289,6 +290,22 @@ def mark_candidate_applied(candidate_id, card_id, revision_id=None, db_path=None
     _finish_candidate(
         candidate_id, "applied", card_id, revision_id, None, db_path
     )
+
+
+def accept_event_gate(candidate_id, payload_json, receipt, db_path):
+    """持久确认本次冻结目标和证据的准入；applied 仍是 Memory 提交后的交付回执。"""
+    conn = connect_writer_ops(db_path)
+    try:
+        count = conn.execute(
+            "UPDATE memory_candidates SET event_gate_receipt=?, updated_at=? "
+            "WHERE candidate_id=? AND payload_json=? AND status='pending'",
+            (json.dumps(receipt, sort_keys=True), _now(), candidate_id, payload_json),
+        ).rowcount
+        if count != 1:
+            raise ValueError("event_gate_candidate_changed")
+        conn.commit()
+    finally:
+        conn.close()
 
 def mark_candidate_dropped(candidate_id, db_path=None, *, reason=None):
     _finish_candidate(candidate_id, "dropped", None, None, reason, db_path)
