@@ -51,6 +51,11 @@ def create_mcp(service):
         return service.remember(agent_id, app_id, source_event_id, channel)
 
     @server.tool()
+    def add_manual_memory(agent_id: str, app_id: str, content: str, channel: str = "main") -> dict:
+        """将明确委托保存的笔记或摘要写入该 Agent 已授权来源的长期记忆。证据标为人工记录。"""
+        return service.add_manual_memory(agent_id, app_id, content, channel)
+
+    @server.tool()
     def revise_memory(agent_id: str, app_id: str | None, card_id: int, content: str,
                       expected_current_revision_id: int, channel: str = "main",
                       scope: Literal["source-scoped", "owner-global"] = "source-scoped") -> dict:

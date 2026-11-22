@@ -26,7 +26,7 @@ from thalemora.memory.field_sources import get, mark
 
 TOKEN = "synthetic-pre6-owner-token"
 TOOLS = {"list_agents", "search", "history", "inner_state", "memory", "evidence",
-         "import_history", "remember", "revise_memory", "trash_memory", "restore_memory"}
+         "import_history", "remember", "add_manual_memory", "revise_memory", "trash_memory", "restore_memory"}
 
 
 def run_http(root, listener):
@@ -99,7 +99,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         data = reply.structuredContent
         if data is None:
             values = [json.loads(item.text) for item in reply.content]
-            return values[0] if name in {"remember", "revise_memory", "trash_memory", "restore_memory"} else values
+            return values[0] if name in {"remember", "add_manual_memory", "revise_memory", "trash_memory", "restore_memory"} else values
         return data["result"] if set(data) == {"result"} else data
 
     async def error(self, session, name, args, message):
@@ -346,6 +346,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                          ("inner_state", {"kind": "emotion"}), ("memory", {}),
                          ("evidence", {"card_id": saved["card_id"]}),
                          ("remember", {"source_event_id": "event-1"}),
+                         ("add_manual_memory", {"content": "越域人工笔记"}),
                          ("revise_memory", dict(card_id=saved["card_id"], content="越权修订",
                                                 expected_current_revision_id=saved["current_revision_id"])),
                          ("import_history", {"events": [dict(self.event, app=domain["app_id"], channel=domain["channel"])]})]
@@ -376,6 +377,37 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                                       content="stdio 合成人工修订", expected_current_revision_id=saved["current_revision_id"]))
             self.assertTrue(changed["changed"])
             await self.error(session, "memory", dict(self.domain, channel="private"), "授权")
+
+    async def test_manual_note_without_archive_event(self):
+        other = self.service.register_agent("合成 Agent B")["agent_id"]
+        self.service.grant_source(other, self.app)
+        self.service.grant_source(self.agent, "other-app")
+        note = "合成人工摘要，保留  空格"
+        async with serve(self.service) as url, connect(url) as (session, _):
+            await self.error(session, "add_manual_memory", dict(self.domain, content=" \n"), "不能为空")
+            saved = await self.call(session, "add_manual_memory", dict(self.domain, content=note))
+            card = dict(self.domain, card_id=saved["card_id"])
+            self.assertEqual([r["content"] for r in await self.call(session, "memory", self.domain)], [note])
+            self.assertEqual(await self.call(session, "history", self.domain), [])
+            self.assertEqual(await self.call(session, "memory", dict(self.domain, agent_id=other)), [])
+            await self.error(session, "evidence", dict(card, app_id="other-app"), "card_outside_scope")
+            proof, = await self.call(session, "evidence", card)
+            self.assertEqual(json.loads(proof["source_ref"]), dict(kind="manual_note", app=self.app,
+                                                                  agent_id=self.agent, channel="main"))
+            self.assertEqual((proof["source_kind"], proof["resolution"], proof["verified"],
+                              proof["current_source_text"]), ("manual", "manual_note", False, None))
+            rows = self.service._local_rows(self.agent, self.app, "main")
+            self.assertEqual([r["text"] for r in rows], [note])
+            with closing(sqlite3.connect(self.service.memory_path(self.agent, self.app))) as db:
+                self.assertEqual(db.execute("SELECT c.source,r.origin FROM cards c JOIN card_revisions r "
+                                            "ON c.current_revision_id=r.id").fetchone(), ("manual", "manual_ui"))
+            edited = await self.call(session, "revise_memory", dict(card, content="修改的合成摘要",
+                                     expected_current_revision_id=saved["current_revision_id"]))
+            target = dict(card, expected_current_revision_id=edited["current_revision_id"])
+            removed = await self.call(session, "trash_memory", target)
+            self.assertEqual(await self.call(session, "memory", self.domain), [])
+            await self.call(session, "restore_memory", dict(target, expected_trash_version=removed["trash_version"]))
+            self.assertEqual((await self.call(session, "memory", self.domain))[0]["content"], "修改的合成摘要")
 
 
 if __name__ == "__main__":

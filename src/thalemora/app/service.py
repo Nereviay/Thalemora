@@ -224,6 +224,17 @@ class Application:
                 memory.execute("INSERT INTO archive_card_scopes VALUES(?,?,?)", (result['card_id'], app_id, channel))
                 return result
 
+    def add_manual_memory(self, agent_id, app_id, content, channel="main"):
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("人工记录正文不能为空")
+        path = self.memory_path(agent_id, app_id, channel, scope=SOURCE)
+        ref = dict(kind="manual_note", agent_id=agent_id, app=app_id, channel=channel)
+        with self._memory_transaction(agent_id, app_id, channel, SOURCE, path) as db:
+            result = create_card_in_transaction(db, content=content, origin="manual_ui", source="manual",
+                evidence_source_kind="manual", evidence_source_ref=json.dumps(ref, ensure_ascii=False))
+            db.execute("INSERT INTO archive_card_scopes VALUES(?,?,?)", (result["card_id"], app_id, channel))
+            return result
+
     def revise_memory(self, agent_id, app_id, card_id, content, expected_current_revision_id, channel="main", *, scope=SOURCE):
         """同一写事务核归属/CAS；owner 编辑不转移归属，也不认领未知旧卡。"""
         if not isinstance(content, str) or not content.strip():

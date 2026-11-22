@@ -22,11 +22,14 @@ def reference_scope(evidence, agent_id, *, creation=False):
     if not isinstance(ref, dict) or ref.get("agent_id", agent_id) != agent_id:
         return None
     kind = ref.get("kind")
-    if kind not in (None, "archive_quote", "mcp_explicit_manual_revision"):
+    if kind not in (None, "archive_quote", "manual_note", "mcp_explicit_manual_revision"):
         return None
     if not isinstance(ref.get("app"), str) or not ref["app"].strip() or ref.get("channel") not in ("main", "private"):
         return None
-    if kind == "mcp_explicit_manual_revision":
+    if kind == "manual_note":
+        if evidence["source_kind"] != "manual" or ref.get("agent_id") != agent_id:
+            return None
+    elif kind == "mcp_explicit_manual_revision":
         if creation or evidence["source_kind"] != "manual":
             return None
     elif (not isinstance(ref.get("source_event_id"), str) or not ref["source_event_id"].strip()

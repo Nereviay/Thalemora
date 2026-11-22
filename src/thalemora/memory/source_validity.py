@@ -13,13 +13,17 @@ def resolve_archive_evidence(db, evidence, agent_id, app_id, channel):
         return dict(result, resolution="invalid_reference")
     if not isinstance(ref, dict):
         return dict(result, resolution="invalid_reference")
-    if ref.get("kind") not in (None, "archive_quote", "mcp_explicit_manual_revision"):
+    if ref.get("kind") not in (None, "archive_quote", "manual_note", "mcp_explicit_manual_revision"):
         return result
     if (ref.get("app") != app_id or ref.get("channel") != channel
             or ref.get("agent_id", agent_id) != agent_id):
         return dict(result, resolution="outside_scope")
     if kind == "manual" and ref.get("kind") == "mcp_explicit_manual_revision":
         return dict(result, resolution="manual_revision")
+    if ref.get("kind") == "manual_note":
+        if kind == "manual" and ref.get("agent_id") == agent_id:
+            return dict(result, resolution="manual_note")
+        return result
     if kind == "derived" and ref.get("kind") != "archive_quote":
         return result
     if (not isinstance(ref.get("source_event_id"), str) or not ref["source_event_id"].strip()

@@ -176,6 +176,8 @@ def scoped_rows(path, app_id, channel, archive_path, agent_id):
             if key is not None:
                 refs.setdefault(card_id, set()).add(key)
             status = state["resolution"]
+            if status == "manual_note" and (item["origin"], item["change_type"]) != ("manual_ui", "create"):
+                status = "unsupported"
             if status == "manual_revision" and (item["origin"], item["change_type"]) != ("manual_ui", "manual_edit"):
                 status = "unsupported"
             states.setdefault(item["revision_id"], []).append(status)
@@ -197,7 +199,7 @@ def scoped_rows(path, app_id, channel, archive_path, agent_id):
                 rows.append(row)
         else:
             statuses = states.get(row['provenance']['revision_id'], [])
-            if row['source_id'] in ids and statuses and all(s in {'current', 'manual_revision'} for s in statuses):
+            if row['source_id'] in ids and statuses and all(s in {'current', 'manual_note', 'manual_revision'} for s in statuses):
                 rows.append(row)
     # 历史/停用扩展也只抑制确切来源版本，不让原话兜底绕过停用。
     suppressed_raw = set().union(*unit_refs.values()) if unit_refs else set()
