@@ -144,7 +144,8 @@ def enqueue_candidates(
     routes: Sequence[Mapping], *, scene_store, scene_id: str,
     expected_revision_no: int, raw_db_path: str, ops_db_path: str,
     batch_key: str, extractor_model: str,
-    gate_previews: Sequence[Mapping],
+    gate_previews: Sequence[Mapping], receipt_id=None, receipt_fingerprint=None,
+    canonical_user_text=None,
 ) -> dict:
     """接收调用者已提取的 memory 路由；核验来源后原子入既有候选队列。
 
@@ -168,10 +169,15 @@ def enqueue_candidates(
                            "source_fingerprint": revision["source_fingerprint"],
                            "routes": routes, "previews": gate_previews,
                            "extractor_model": extractor_model})
+        source_id = receipt_id or batch_key
+        if receipt_id:
+            input_hash = receipt_fingerprint
         previous = ops.get_writer_batch(batch_key, ops_db_path)
         if previous is not None and previous["input_hash"] != input_hash:
             raise SourceConflict("candidate batch conflict")
         for index, route in enumerate(routes):
+            if route.get("route") == "plan" and receipt_id:
+                continue
             if route.get("route") != "memory":
                 raise SceneContractError("only memory routes can enter Gatekeeper")
             preview = previews.get(index)
@@ -200,23 +206,30 @@ def enqueue_candidates(
             if not route.get("memory_type") or not route.get("identity"):
                 raise SceneContractError("candidate must preserve normalized memory type and identity")
             raw_ids.extend(item["event_id"] for item in verified)
-            candidate_hash = _sha({"receipt_id": batch_key, "candidate_index": index,
+            candidate_hash = _sha({"receipt_id": source_id, "candidate_index": index,
                                    "route": route, "preview_action": preview["action"]})
             candidate_id = hashlib.sha256(
-                f"scene-writer:{batch_key}:{index}:{candidate_hash}".encode("utf-8")
+                f"scene-writer:{source_id}:{index}:{candidate_hash}".encode("utf-8")
             ).hexdigest()
             candidates.append({
                 "candidate_id": candidate_id,
                 "payload": _candidate_payload(route, verified_evidence=verified, scene_meta={
-                    "receipt_id": batch_key,
+                    "receipt_id": source_id,
                     "scene_id": scene_id, "scene_revision_no": expected_revision_no,
-                    "source_fingerprint": revision["source_fingerprint"],
+                    "source_fingerprint": receipt_fingerprint or revision["source_fingerprint"],
                     "candidate_index": index,
                     "gate_action": preview["action"],
                     "gate_decision": dict(decision),
                     "frozen_memory_refs": frozen_refs,
                 }),
             })
+            if (canonical_user_text and route.get("event_state") in {"ongoing", "update", "closed"}
+                    and route.get("claim_scope") == "user_fact" and len(verified) == 1):
+                ref = verified[0]
+                quote = route["evidence"][0]["quote"]
+                if (ref["source_kind"] == "user_text_exact" and ref["char_start"] == 0
+                        and ref["char_end"] == len(quote) and canonical_user_text(ref["event_id"]) == quote):
+                    candidates[-1]["payload"]["event_state"] = route["event_state"]
         if not candidates:
             return {"inserted": False, "candidate_count": 0, "candidate_ids": [],
                     "status": "deferred_budget"}
@@ -224,12 +237,47 @@ def enqueue_candidates(
             "batch_key": batch_key, "raw_start_id": min(raw_ids),
             "raw_end_id": max(raw_ids), "input_hash": input_hash,
             "extractor_model": extractor_model,
-            "policy_version": "scene-source-candidates-v1",
+            "policy_version": RECEIPT_POLICY if receipt_id else "scene-source-candidates-v1",
         }, candidates, ops_db_path)
         return {"inserted": inserted, "candidate_count": len(candidates),
                 "candidate_ids": [item["candidate_id"] for item in candidates]}
 
+RECEIPT_POLICY = "memory-vnext-scene-writer-materialize-v1"
+
+
+def materialize_receipt(receipt_id, *, admission_store, scene_store, raw_db_path,
+                        ops_db_path, extractor_model, canonical_user_text=None):
+    receipt = admission_store.get_receipt(receipt_id)
+    if receipt is None:
+        raise SceneWriterMaterializationError("admission receipt not found")
+    disposition = receipt["disposition"]
+    base = dict(ok=True, receipt_id=receipt_id, disposition=disposition)
+    if disposition in {"scene_only", "drop_scene", "pending"}:
+        status = "pending_lane_not_memory_writer" if disposition == "pending" else "no_memory_materialization"
+        return dict(base, status=status, candidate_count=0, queue_mutated=False)
+    if disposition != "promote_memory":
+        raise SceneWriterMaterializationError("unknown scene disposition")
+    identity = dict(receipt_id=str(receipt_id), scene_id=receipt["scene_id"],
+                    scene_revision_no=int(receipt["scene_revision_no"]),
+                    source_fingerprint=receipt["source_fingerprint"], policy_version=RECEIPT_POLICY)
+    batch_key = "scene-" + _sha(identity)
+    result = enqueue_candidates(receipt["normalized_candidates"], scene_store=scene_store,
+        scene_id=identity["scene_id"], expected_revision_no=identity["scene_revision_no"],
+        raw_db_path=raw_db_path, ops_db_path=ops_db_path, batch_key=batch_key, extractor_model=extractor_model,
+        gate_previews=admission_store.list_gate_previews(receipt_id), receipt_id=identity["receipt_id"],
+        receipt_fingerprint=identity["source_fingerprint"], canonical_user_text=canonical_user_text)
+    if not result["candidate_count"]:
+        return dict(base, status="nothing_materializable", candidate_count=0, queue_mutated=False)
+    return dict(base, batch_key=batch_key, candidate_count=result["candidate_count"], candidate_ids=result["candidate_ids"],
+                status="materialized" if result["inserted"] else "already_materialized", queue_mutated=result["inserted"])
 
 
 # 独立与念念 Writer 共用已验的事实边界；不增加额外分类调用。
-WRITER_FACT_RULES = '当次“记住、更新、纠正上面那条、不要重复建立”等记忆管理指令不是事实或长期偏好，不单独提成候选。\n事实与指令混在一句时，只提事实内容，逐字证据只引支撑事实的片段；纯管理指令返回空 candidates。\n例如“通知改为电话，请更新原来那条”只提“通知改为电话”，不能再提“用户偏好更新而非新建”。\n明确要求未来长期采用某种记忆管理方式（如“以后所有记忆标题始终用中文”）仍是可提炼的长期偏好，\n不能仅因句子含记忆相关词就过滤。一个事实只提一项，不把同一事实的操作要求拆成第二项。\n'
+WRITER_FACT_RULES = """当次“记住、更新、纠正上面那条、不要重复建立”等记忆管理指令不是事实或长期偏好，不单独提成候选。
+事实与指令混在一句时，只提事实内容，逐字证据只引支撑事实的片段；纯管理指令返回空 candidates。
+例如“通知改为电话，请更新原来那条”只提“通知改为电话”，不能再提“用户偏好更新而非新建”。
+明确要求未来长期采用某种记忆管理方式（如“以后所有记忆标题始终用中文”）仍是可提炼的长期偏好。
+不能仅因句子含记忆相关词就过滤。一个事实只提一项，不把同一事实的操作要求拆成第二项。
+保留用户说的期限，把助手单方面的提议和用户已经接受的约定分开。
+已明确改选的方案可作为当前决定，尚待挑选、购买或执行的步骤保持未完成。
+"""

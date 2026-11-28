@@ -1,7 +1,7 @@
 {
   "display_name": "洄海 · 自动召回",
   "author": "Thalemora",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "loading_order": 100,
   "js": "index.js",
   "generate_interceptor": "thalemoraRecallInterceptor",

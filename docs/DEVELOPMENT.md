@@ -1,6 +1,6 @@
 # 开发与模型替身
 
-**当前正式版为 [v0.9.0](https://github.com/Nereviay/Thalemora/releases/tag/v0.9.0)。** 新的公共记忆选择、自然浮现和余韵仅供具备主动调用条件的客户端或开发者接入；既有 SillyTavern / Operit 插件没有自动升级到新宿主能力，新聊天同步仍需单独接线。
+当前正式版为 [v0.10.0](https://github.com/Nereviay/Thalemora/releases/tag/v0.10.0)。聊天前的可信前文、会话身份与日摘要需要宿主接入。
 
 开发接入时，可以使用临时数据和模型替身，不需要付费 API。正常使用后台整理请看[模型与后台整理](AUTOMATIC_MEMORY.md)。
 
@@ -31,7 +31,7 @@ Python 3.10–3.15 均可使用同一份 `requirements.lock`，安装时会自�
 
 ## 构建发行安装包
 
-版本由 `pyproject.toml` 唯一指定，构建后端为其中固定版本的 setuptools。正式版 wheel、sdist 和单独的 `SHA256SUMS.txt` 放入 `dist/0.9.0/`，不要覆盖 `dist/` 中已有的正式版资产。
+版本由 `pyproject.toml` 唯一指定，构建后端为其中固定版本的 setuptools。正式版 wheel、sdist 和单独的 `SHA256SUMS.txt` 放入 `dist/0.10.0/`，不要覆盖 `dist/` 中已有的正式版资产。
 
 构建使用全新的临时源码目录，排除 `.git`、`dist`、`build`、缓存和旧 egg-info；先生成 sdist，再从解包的 sdist 构建 wheel，避免混入旧构建残留。安装 wheel 后，在源码目录外检查发行版版本、模块实际导入位置与 `thalemora --help`。只使用临时合成状态，不连接现役数据库或模型。构建和本地安装不代表已获准发布或生产升级。
 
@@ -70,4 +70,4 @@ result = recall.recall_for_turn(agent_id, app_id, query)
 
 已有评分直接传 `reflective_bias_by_card_id`、`reflective_affinity_by_card_id`、`activation_bias_by_card_id`，不可擅自补造 LLM 评分；`user_reactivated_card_ids` 与 `spoken_card_ids` 仅使用宿主真实回执。可信进程内调用 `recall_vnext_from_runtime(..., ambient_state={"engine": engine, "candidate_ids": ids, "now": now, "enabled": True, ...})` 会把普通聊天、主动联系的 Related 与 Ambient 组合在同一个最终消息块，并在 trace 中保留卡片与版本；工具拦截仍由宿主维护。这个 opt-in 参数不从客户端请求正文解析。
 
-念念 VNext 开发源码有可选的 `public_vnext_recall` 回调入口；未注入时继续使用旧功能，现役部署未切换。这项开发接线并不意味着生产已经启用公共自然浮现，也不意味着已经验证实际 Provider Token/费用。
+使用进程内模型配置接口时，由宿主提供配置文件或显式传入 `defaults`。有效配置优先于默认值，缺少两者时返回配置错误。

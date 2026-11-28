@@ -31,11 +31,12 @@ class ModelHandler(BaseHTTPRequestHandler):
             if self.server.slow:
                 self.server.started.set()
                 self.server.release.wait(5)
-            source = payload["sources"][0]
-            output = {"candidates": [{"content": source["text"], "title": "合成长期约定",
-                       "memory_type": "event", "claim_scope": "user_fact", "evidence": [{
-                           "source_event_id": source["source_event_id"], "version": source["version"],
-                           "quote": source["text"]}]}]}
+            source = payload["events"][0]
+            output = {"disposition":"promote_memory", "reason":"跨场景使用的合成项目规则",
+                      "memory_candidates":[{"route":"memory","identity":"徽记","title":"合成长期约定",
+                      "content":source["quotable_text"],"keywords":["蓝色徽记"],"importance":7,
+                      "valence":0.5,"arousal":0.4,"reason":"长期规则","memory_type":"stable_fact",
+                      "claim_scope":"user_fact","evidence":[{"event_id":source["event_id"],"quote":source["quotable_text"]}]}]}
         elif module == "gatekeeper":
             output = {"action": "new", "importance": 7, "long_term_value": True,
                       "reason": "合成长期价值判断"}

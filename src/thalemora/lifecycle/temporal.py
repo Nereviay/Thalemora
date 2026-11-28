@@ -74,14 +74,20 @@ def read_card_temporal_relations(card_id: int, memory_db) -> dict | None:
 
         # 只返回显式 identity lineage，并核对两端修订归属。
         lineage = []
-        for rel in db.execute(
-            """SELECT lineage_id, from_card_id, to_card_id, from_revision_id,
-                      to_revision_id, relation_type, origin, reason, created_at
-               FROM memory_card_lineage
-               WHERE retired_at IS NULL AND (from_card_id=? OR to_card_id=?)
-               ORDER BY lineage_id""",
-            (card["id"], card["id"]),
-        ):
+        relations = ()
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_card_lineage'").fetchone():
+            relations = db.execute(
+                """SELECT lineage_id, from_card_id, to_card_id, from_revision_id,
+                          to_revision_id, relation_type, origin, reason, created_at
+                   FROM memory_card_lineage
+                   WHERE retired_at IS NULL AND (from_card_id=? OR to_card_id=?)
+                   ORDER BY lineage_id""",
+                (card["id"], card["id"]),
+            )
+        else:
+            # 旧库仍可读当前修订，但不能据此生成依赖 lineage 的时间提示。
+            issues.append("missing_lineage_table")
+        for rel in relations:
             src = db.execute(
                 "SELECT card_id FROM card_revisions WHERE id=?",
                 (rel["from_revision_id"],),

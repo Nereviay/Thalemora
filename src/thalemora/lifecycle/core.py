@@ -9,6 +9,12 @@ from .activation import ActivationLedger, connect_existing, parse_time
 from .scoring import _authority_blocked, dormancy_score, summarize
 
 
+DEFAULT_ARCHIVE_DAYS = 30.0
+DEFAULT_MIN_DORMANCY_DAYS = 30.0
+DEFAULT_SCORE_THRESHOLD = 1.8
+DEFAULT_REACTIVATION_LOOKBACK_DAYS = 14.0
+
+
 def _cards(conn):
     return [dict(row) for row in conn.execute(
         "SELECT c.id,c.title,c.importance,c.arousal,c.created_at,c.status,c.current_revision_id,"
@@ -55,7 +61,7 @@ def _dormancy(conn, activations, *, now, archive_days, min_dormancy_days, score_
 
 
 def dormancy_candidates(*, memory_db, activation: ActivationLedger, now,
-                        archive_days=30.0, min_dormancy_days=30.0, score_threshold=1.8):
+                        archive_days=DEFAULT_ARCHIVE_DAYS, min_dormancy_days=DEFAULT_MIN_DORMANCY_DAYS, score_threshold=DEFAULT_SCORE_THRESHOLD):
     """只读建议；执行时在锁内重核同一评分、版本及人工权威。"""
     with closing(connect_existing(memory_db, readonly=True)) as conn:
         return _dormancy(conn, activation.summary(), now=now, archive_days=archive_days,
@@ -87,7 +93,7 @@ def _reactivation(conn, activation, *, now, lookback_days, locked=False):
     return sorted(pending, key=lambda item: (item['activation_at'], item['id']), reverse=True)
 
 
-def reactivation_candidates(*, memory_db, activation, now, lookback_days=14.0):
+def reactivation_candidates(*, memory_db, activation, now, lookback_days=DEFAULT_REACTIVATION_LOOKBACK_DAYS):
     """只有显式来源用户事件晚于当前修订的沉底回执，才能恢复。"""
     with closing(connect_existing(memory_db, readonly=True)) as conn:
         return _reactivation(conn, activation, now=now, lookback_days=lookback_days)
@@ -154,7 +160,7 @@ def _index_status(conn, cid, status):
 
 
 def apply_dormancy(candidates, *, memory_db, activation, retrieval_db, now, epoch,
-                   archive_days=30.0, min_dormancy_days=30.0, score_threshold=1.8):
+                   archive_days=DEFAULT_ARCHIVE_DAYS, min_dormancy_days=DEFAULT_MIN_DORMANCY_DAYS, score_threshold=DEFAULT_SCORE_THRESHOLD):
     """新鲜→沉底；批内任一步失败则 canonical、索引、回执全部回滚。
 
     同一 epoch 重放不会再次沉底恢复过的卡片。并发冲突保留原态并返回 id。
@@ -188,7 +194,7 @@ def apply_dormancy(candidates, *, memory_db, activation, retrieval_db, now, epoc
                 conflict_card_ids=conflicts, replayed_card_ids=replayed, **receipts)
 
 
-def apply_reactivation(candidates, *, memory_db, activation, retrieval_db, now, lookback_days=14.0):
+def apply_reactivation(candidates, *, memory_db, activation, retrieval_db, now, lookback_days=DEFAULT_REACTIVATION_LOOKBACK_DAYS):
     """沉底→恢复；锁内重读显式用户来源、当前沉底 epoch 与人工权威。"""
     changed, conflicts = [], []
     with _transaction(memory_db, activation, retrieval_db) as conn:

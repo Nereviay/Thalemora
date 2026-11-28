@@ -39,18 +39,18 @@ class IndexedMemoryTests(unittest.TestCase):
     def test_host_short_chat_requires_a_topic_for_related_memory(self):
         from thalemora.adapters.niannian_vnext import recall_vnext
 
-        project = self.card(text='做完合成演示后好累，散步回家')
+        project = self.card(text='做完合成演示后好困，散步回家')
         move = self.card(text='搬家时提过讨厌纸箱的气味')
         with closing(sqlite3.connect(self.memory)) as db, db:
             db.executemany('UPDATE cards SET title=?, keywords=? WHERE id=?', [
-                ('念念演示', '', project['card_id']),
+                ('纸鸢演示', '', project['card_id']),
                 ('讨厌的纸箱气味', '纸箱，搬家，讨厌', move['card_id']),
             ])
         self.archive.import_history([dict(app='niannian', channel='main',
-            source_event_id='old:demo', version=1, role='user', text='演示之后好累')])
+            source_event_id='old:demo', version=1, role='user', text='演示之后好困')])
         self.indexed()
-        for query, expected in (('好累', None), ('讨厌你哦', None), ('散步', None),
-                                ('念念', project), ('搬家', move)):
+        for query, expected in (('好困', None), ('讨厌啦', None), ('散步', None),
+                                ('纸鸢', project), ('搬家', move)):
             with self.subTest(query=query):
                 result = recall_vnext(self.app, 'chenlin', 'niannian', dict(user_text=query))
                 refs = result['trace']['related']['memory_refs']
@@ -59,7 +59,7 @@ class IndexedMemoryTests(unittest.TestCase):
                 self.assertEqual([], result['trace']['archive'])
                 if expected is None:
                     self.assertEqual('', result['rendered'])
-        history = recall_vnext(self.app, 'chenlin', 'niannian', dict(user_text='好累的原话是什么？'))
+        history = recall_vnext(self.app, 'chenlin', 'niannian', dict(user_text='好困的原话是什么？'))
         self.assertEqual(['old:demo'], [a['id'] for a in history['trace']['archive']])
         self.assertEqual([project['card_id']],
                          [r['card_id'] for r in history['trace']['related']['memory_refs']])

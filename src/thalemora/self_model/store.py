@@ -7,6 +7,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from pathlib import Path
 from typing import Any, ContextManager, Iterable, Iterator
 
 from .contract import (
@@ -17,6 +18,15 @@ from .contract import (
 from .evidence import EvidenceRecord
 from .model import P3CClaimVersion
 from .schema import _SCHEMA, _APPEND_ONLY_TABLES
+
+
+def open_read_only(path):
+    """打开现有管理视图，调用方读完后关闭。"""
+    db_path = Path(path).expanduser().resolve(strict=True)
+    connection = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True,
+                                 isolation_level=None, check_same_thread=False)
+    connection.execute("PRAGMA query_only=ON")
+    return ReadOnlySelfModelStore(connection)
 
 
 def _canonical_json(value: Any) -> str:
@@ -1052,3 +1062,13 @@ class SQLiteSelfModelStore:
             results.append(item)
         return tuple(results)
 
+
+class ReadOnlySelfModelStore(SQLiteSelfModelStore):
+    def close(self):
+        self.connection.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()

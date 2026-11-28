@@ -368,8 +368,6 @@ def maintenance_tick(application, agent_id, app_id, channel="main", *, limit=4, 
                         job_state(path, job["job_id"], "done", "no_live_source")
                         continue
                     output = call(provider, path, job["job_id"], "writer", {
-                        "instruction": "Extract durable Scene memories only; return candidates with content, memory_type, "
-                                       "claim_scope and exact evidence [{source_event_id,version,quote}]. Empty list means discard.",
                         "scene_id": job["scene_id"], "scene_revision": job["scene_revision"], "sources": live})
                     candidates = materialize(output["candidates"], sources, agent_id, app_id, channel, job["job_id"])
                     ids = [r["archive_rowid"] for r in sources]
@@ -386,8 +384,13 @@ def maintenance_tick(application, agent_id, app_id, channel="main", *, limit=4, 
                         result = {"card_id": prior["card_id"], "current_revision_id": prior["current_revision_id"]}
                     else:
                         payload = json.loads(candidate["payload_json"])
+                        # Archive 候选的引文已在 materialize 核对，本轮又核实了相同来源版本。
+                        roles = {s["source_event_id"]: s["role"] for s in sources}
+                        refs = [json.loads(row["source_ref"]) for row in payload["evidence_rows"]]
+                        quotes = [{"role": roles[ref["source_event_id"]], "quote": ref["quote"]} for ref in refs]
+                        gate_input = dict(payload, source_quotes=quotes)
                         frozen = freeze(memory_path, agent_id, app_id, channel)
-                        gate_hash = gate.gate_input_hash(payload, frozen, {
+                        gate_hash = gate.gate_input_hash(gate_input, frozen, {
                             "model": "synthetic-injected" if provider.synthetic else provider.model("gatekeeper"),
                             "thinking_enabled": False, "reasoning_effort": None})
                         # 上轮 uncertain 且证据/当前卡/模型配置完全相同时，不再付费询问。
@@ -395,7 +398,7 @@ def maintenance_tick(application, agent_id, app_id, channel="main", *, limit=4, 
                         if (candidate["last_error"] == "uncertain"
                                 and candidate["last_gate_input_hash"] == gate_hash):
                             continue
-                        decision, frozen = gate.decide(payload, frozen, provider=lambda messages: call(
+                        decision, frozen = gate.decide(gate_input, frozen, provider=lambda messages: call(
                             provider, path, job["job_id"], "gatekeeper", {"messages": messages}))
                         ops.record_gate_result(candidate_id, gate_hash,
                             decision["reason"], increment=True, db_path=path)

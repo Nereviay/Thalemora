@@ -1,10 +1,10 @@
 # 安装聊天插件
 
-v0.7.0 提供 **SillyTavern 和 Operit 插件适配**。两个插件版本均为 0.2.0，从[新版下载页](https://github.com/Nereviay/Thalemora/releases/tag/v0.7.0)获取。
+从 [v0.10.0 下载页](https://github.com/Nereviay/Thalemora/releases/tag/v0.10.0)选择你用的聊天软件。两个插件都更新到了 0.2.1，较长的消息也能查找相关记忆。
 
 ## 先准备三样东西
 
-1. **正在运行的洄海 v0.9.0 服务**，可装在电脑、服务器或支持的工作区。
+1. **正在运行的洄海 v0.10.0 服务**，可装在电脑、服务器或支持的工作区。
 2. **服务根地址**，例如 `https://你的洄海地址`，不要加 `/api/recall`。
 3. **专用召回凭据**，由洄海服务管理者为目标 AI 和来源生成。自部署用户按[生成凭据](RECALL_API.md#生成和撤销召回凭据)操作。
 
@@ -12,7 +12,7 @@ v0.7.0 提供 **SillyTavern 和 Operit 插件适配**。两个插件版本均为
 
 ## SillyTavern 1.19.0
 
-1. 下载 `thalemora-sillytavern-0.2.0.zip`。
+1. 下载 `thalemora-sillytavern-0.2.1.zip`。
 2. 在运行酒馆的设备上解压，把包内文件放到：
 
    ```text
@@ -42,7 +42,7 @@ HTTPS 页面请求 HTTP 服务可能被浏览器阻止；远程连接请提供 H
 
 ## Operit 1.12.2
 
-1. 下载 `thalemora-operit-0.2.0.toolpkg` 到手机。
+1. 下载 `thalemora-operit-0.2.1.toolpkg` 到手机。
 2. 打开 Operit「包管理」，选择「插件」分类，点「导入外部插件」并选择文件。
 3. 启用「洄海 · 自动召回」。
 4. 在「工具箱」打开同名设置页，填服务地址、专用凭据和开关，点「保存设置」。

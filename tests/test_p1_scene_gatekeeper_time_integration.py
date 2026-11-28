@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from thalemora.gatekeeper import core, ops
-from thalemora.memory import evidence_resolver, schema
+from thalemora.memory import evidence_resolver, revision_store, schema
 from thalemora.scene import candidates, runtime
 
 
@@ -96,7 +96,7 @@ class SceneGatekeeperTimeIntegrationTest(unittest.TestCase):
             provider=lambda _: dict(
                 action="new", content=QUOTE, title="合成项目偏好",
                 keywords=["星图项目"], category="项目", importance=6,
-                long_term_value=True,
+                long_term_value=True, user_rule_quote=QUOTE,
             ),
         )
         arguments.update(changes)
@@ -140,6 +140,30 @@ class SceneGatekeeperTimeIntegrationTest(unittest.TestCase):
     def test_explicit_time_preserves_offset_precision_and_backdate(self):
         candidate_id = self.enqueue(happened_at=EVENT_TIME)["candidate_ids"][0]
         self.assert_landed(candidate_id, EVENT_TIME)
+
+    def test_final_gate_uses_resolved_author_text_for_a_new_detail(self):
+        old = revision_store.create_card(
+            self.memory, content="合成星图项目采用标记", source="auto", origin="auto_writer",
+            evidence_source_kind="derived", evidence_source_ref="synthetic-project-record")
+        card_id = old["card_id"]
+        frozen = core.freeze_candidate_map_from_card_ids([card_id], memory_db_path=self.memory)
+        candidate_id = self.enqueue(memory_type="stable_fact")["candidate_ids"][0]
+
+        def provider(messages):
+            received = json.loads(messages[-1]["content"])["candidate"]["source_quotes"]
+            self.assertEqual([{"role": "user", "quote": QUOTE}], received)
+            return dict(action="drop", fact_relation="adds_detail", target_card_id=card_id,
+                        same_memory=True, same_memory_confidence=.98, new_quote="蓝色标记")
+
+        result, status = self.apply(candidate_id, frozen_map=frozen, provider=provider)
+        self.assertEqual((200, "extend"), (status, result.get("action")), result)
+        with self.connect(self.memory) as connection:
+            self.assertEqual((old["current_revision_id"], QUOTE), tuple(connection.execute(
+                "SELECT base_revision_id,content FROM memory_extensions WHERE card_id=?", (card_id,)
+            ).fetchone()))
+        resolved, = evidence_resolver.resolve_extension_evidence(
+            result["extension_id"], memory_db_path=self.memory, raw_db_path=self.raw)
+        self.assertEqual((True, "user", QUOTE), (resolved["verified"], resolved["role"], resolved["quote"]))
 
     def test_candidate_time_is_not_replaced_by_scene_event_time(self):
         happened_at = "1999-12-31T23:59:59.987654-05:00"

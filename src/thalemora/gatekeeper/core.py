@@ -13,6 +13,7 @@ from functools import partial
 from thalemora.memory import revision_store, evidence_resolver, event_state
 from . import keywords as keyword_policy
 from . import ops as ops_store
+from . import scene_facts
 
 # 仅公共决策协议；产品叙述视角由调用方 provider 负责，不携带私人 Prompt。
 SYSTEM = """按候选事实及冻结卡片决定 new/extend/correct/supersede/drop/uncertain，只返回 JSON 对象。
@@ -48,7 +49,7 @@ def _profile_fingerprint(profile):
 
 GATE_POLICY_VERSION = "p3c1-gate-v10-memory-first-person-quality"
 
-SCENE_NEW_CARD_POLICY_VERSION = "p3c1-gate-v11-durable-new-card-admission"
+SCENE_NEW_CARD_POLICY_VERSION = "p3c1-gate-v12-grounded-scene-facts"
 
 VALID_ACTIONS = {"new", "extend", "supersede", "correct", "drop", "uncertain"}
 
@@ -175,7 +176,7 @@ def _future_plan_terms(core):
 def _guard_future_plan_decision(decision, core, frozen_map):
     """未来计划先保住 extractor 已验证正文；不让 gate 把它揉进无关通用卡。"""
     terms = _future_plan_terms(core)
-    if not terms or decision["action"] in {"drop", "uncertain"}:
+    if not terms or decision["action"] in {"drop", "uncertain"} or decision.get("confirmed_decision_change"):
         return decision
     guarded = dict(decision)
     if guarded["action"] == "new":
@@ -199,7 +200,7 @@ def _guard_future_plan_decision(decision, core, frozen_map):
     return guarded
 
 def _parse_decision(raw, frozen_map, fallback_content, *, fallback_importance=None,
-                    verify_event_state=False):
+                    verify_event_state=False, scene_core=None):
     try:
         decision = raw if isinstance(raw, dict) else json.loads(raw)
     except Exception as exc:
@@ -221,6 +222,10 @@ def _parse_decision(raw, frozen_map, fallback_content, *, fallback_importance=No
             raise InvalidGateDecision("invalid_target") from exc
     if action in UPDATE_ACTIONS and target_id not in frozen_by_id:
         raise InvalidGateDecision("target_outside_frozen_map")
+    if scene_core is not None and "source_quotes" in scene_core:
+        decision = scene_facts.ground(decision, scene_core, frozen_by_id, target_id,
+                                      SAME_MEMORY_CONFIDENCE_MIN)
+        action = decision["action"]
     if action not in UPDATE_ACTIONS:
         target_id = None
 
@@ -273,6 +278,9 @@ def _parse_decision(raw, frozen_map, fallback_content, *, fallback_importance=No
 
     if action in UPDATE_ACTIONS and frozen_by_id[target_id].get("read_only"):
         parsed.update(action="drop", target_card_id=None, reason="manual_memory_read_only")
+    if (scene_core is not None and "source_quotes" in scene_core and action == "supersede"
+            and decision.get("fact_relation") == "changed_decision"):
+        parsed["confirmed_decision_change"] = True
     if verify_event_state:
         parsed["confirmed_event_state"] = decision.get("confirmed_event_state")
         parsed["event_state_basis"] = decision.get("event_state_basis")
@@ -310,6 +318,7 @@ def _relation_recheck(core, frozen_map, provider, *, fallback_importance=None):
     )
     raw = (provider or _provider_required)([
         {"role": "system", "content": RELATION_RECHECK_SYSTEM
+         + (scene_facts.RULES if "source_quotes" in core else "")
          + (EVENT_STATE_RULES if core.get("verify_event_state") else "")},
         {"role": "user", "content": prompt},
     ])
@@ -317,6 +326,7 @@ def _relation_recheck(core, frozen_map, provider, *, fallback_importance=None):
         raw, frozen_map, core.get("content") or "",
         fallback_importance=fallback_importance,
         verify_event_state=core.get("verify_event_state", False),
+        scene_core=core,
     )
     decision = _guard_same_memory_update(decision, core)
     if decision["action"] in {"extend", "correct", "supersede"} or decision["reason"] == "manual_memory_read_only":
@@ -344,6 +354,7 @@ def decide(core, frozen_map=None, provider=None):
         raw = (provider or _provider_required)([
             {"role": "system", "content": (
                 SYSTEM + (SCENE_NEW_CARD_RULES if "memory_type" in core else "")
+                + (scene_facts.RULES if "source_quotes" in core else "")
                 + (EVENT_STATE_RULES if core.get("verify_event_state") else "")
             )},
             {"role": "user", "content": prompt},
@@ -352,7 +363,7 @@ def decide(core, frozen_map=None, provider=None):
         raise
     except Exception as exc:
         raise GatekeeperUnavailable(str(exc)) from exc
-    decision = _parse_decision(raw, ordered, core.get("content") or "",
+    decision = _parse_decision(raw, ordered, core.get("content") or "", scene_core=core,
                                verify_event_state=core.get("verify_event_state", False))
     protected_user_boundary = (
         "memory_type" in core
@@ -768,7 +779,7 @@ def apply_candidate(candidate_id, *, ops_db_path, memory_db_path, raw_db_path, p
         ops_store.mark_candidate_failed(candidate_id, "invalid_candidate_payload", ops_db_path)
         return {"ok": False, "status": "pending", "retryable": False,
                 "error": "invalid_candidate_payload"}, 422
-    evidence_error = _candidate_evidence_error(payload, raw_db_path)
+    evidence_error, quotes = _candidate_evidence(payload, raw_db_path)
     if evidence_error:
         ops_store.mark_candidate_failed(candidate_id, evidence_error, ops_db_path)
         return {"ok": False, "status": "pending", "retryable": False,
@@ -782,6 +793,8 @@ def apply_candidate(candidate_id, *, ops_db_path, memory_db_path, raw_db_path, p
 
     core = _core(payload)
     state = payload.get("event_state")
+    if "memory_type" in core and state is None:
+        core["source_quotes"] = quotes
     if state is not None:
         rows = payload["verified_evidence"]
         target = payload.get("event_card_id")
@@ -796,6 +809,8 @@ def apply_candidate(candidate_id, *, ops_db_path, memory_db_path, raw_db_path, p
             return {"ok": False, "status": "pending", "retryable": False, "error": error}, 422
         # 只给 Gate 用户原话，不提供 Writer 对状态的猜测、标题或时间线。
         core.update(title="", content=quote, keywords=[], happened_at=None, verify_event_state=True)
+        if "memory_type" in core:
+            core["source_quotes"] = [{"role": "user", "quote": quote}]
         include_read_only = True
     if frozen_map is None:
         try:
@@ -1023,17 +1038,18 @@ def maintain(card, streams, *, provider=None):
     """One shared Gatekeeper decision path for nightly metadata + Water routing."""
     return propose_maintenance(card, streams, provider=provider)
 
-def _candidate_evidence_error(payload, raw_db_path):
+def _candidate_evidence(payload, raw_db_path):
     if not isinstance(payload, dict):
-        return "invalid_candidate_payload"
+        return "invalid_candidate_payload", []
     rows = payload.get("verified_evidence")
     if not isinstance(rows, list) or not rows:
-        return payload.get("evidence_state") or "evidence_required"
+        return payload.get("evidence_state") or "evidence_required", []
     kinds = {"user_text_exact", "assistant_text_exact", "raw_range", "manual",
              "agent_mcp", "bottle_answer", "derived", "legacy_unverified"}
+    quotes = []
     for row in rows:
         if not isinstance(row, dict) or row.get("source_kind") not in kinds:
-            return "evidence_invalid"
+            return "evidence_invalid", []
         if row["source_kind"] in {"user_text_exact", "assistant_text_exact"}:
             full = {key: row.get(key) for key in (
                 "source_kind", "source_ref", "raw_event_start_id", "raw_event_end_id",
@@ -1041,6 +1057,7 @@ def _candidate_evidence_error(payload, raw_db_path):
             resolved = evidence_resolver._resolve_evidence_rows([full], raw_db_path)[0]
             expected_role = "user" if row["source_kind"] == "user_text_exact" else "assistant"
             if not row.get("event_hash") or not resolved["verified"] or resolved["role"] != expected_role:
-                return "evidence_invalid:" + resolved["resolution"]
-    return None
+                return "evidence_invalid:" + resolved["resolution"], []
+            quotes.append({"role": expected_role, "quote": resolved["quote"]})
+    return None, quotes
 

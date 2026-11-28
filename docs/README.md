@@ -1,8 +1,8 @@
 # 洄海使用文档
 
-第一次使用，从[新手指南](GETTING_STARTED.md)开始。当前可下载正式版为 [v0.9.0](https://github.com/Nereviay/Thalemora/releases/tag/v0.9.0)，安装与插件教程以正式版为准。
+第一次使用，从[新手指南](GETTING_STARTED.md)开始。当前可下载正式版为 [v0.10.0](https://github.com/Nereviay/Thalemora/releases/tag/v0.10.0)，安装与插件教程以正式版为准。
 
-**v0.9.0 新增**按话题和有效证据选择记忆、可信宿主的自然浮现与余韵、持续事项状态证据。使用这些新能力需要聊天应用主动接入；详情见[应用接入](INTEGRATION.md)。既有 SillyTavern / Operit 插件没有自动升级到新宿主能力，新聊天同步仍需单独接线。
+**v0.10.0** 可以导入 ChatGPT 导出的文字记录，追问原话，更新已改变的决定。连接了每日摘要的应用还能按说话人引用原句。[这版有哪些变化](CHANGELOG.md)
 
 | 你想做什么 | 阅读哪篇 |
 | --- | --- |
