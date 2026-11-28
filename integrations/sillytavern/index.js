@@ -79,9 +79,9 @@ globalThis.thalemoraRecallInterceptor = async function (chat, contextSize, abort
     }
     const latest = chat.findLast(message => message.is_user && !message.is_system);
     if (!latest || typeof latest.mes !== 'string' || !latest.mes.trim()) return;
-    // 接口限制 200 个 Unicode 字符；不截断或改写用户的问题。
-    if (Array.from(latest.mes).length > 200) {
-        console.warn('[Thalemora] 本轮消息超过召回接口 200 字符限制，已跳过记忆');
+    // 接口限制 8192 个 Unicode 字符；不截断或改写用户的问题。
+    if (Array.from(latest.mes).length > 8192) {
+        console.warn('[Thalemora] 本轮消息超过召回接口 8192 字符限制，已跳过记忆');
         return;
     }
 

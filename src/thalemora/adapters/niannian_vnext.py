@@ -2,14 +2,17 @@
 
 身份、raw_to_archive 和 previous_assistant_ref 只由宿主同步器提供，不能取自
 请求正文。映射值包含 agent_id/app_id/channel/source_event_id/version。
-缺映射时整包保守为空，避免无法排除当前可见原话。trace 是内部证据包。
+部分可见原话缺映射时，只允许能排除这些 Raw ID 的当前卡片。trace 是内部证据包。
 """
 import json
 import sqlite3
 from contextlib import closing, nullcontext
+from functools import partial
 from pathlib import Path
 
 from thalemora.retrieval.intent import recall_for_intent
+from thalemora.retrieval.recall import constrained_quote_request
+from thalemora.retrieval.turn_context import acknowledged_followup
 
 
 def read_canonical_events_for_vnext(runtime_db_path, request):
@@ -33,23 +36,36 @@ def read_canonical_events_for_vnext(runtime_db_path, request):
     with closing(sqlite3.connect(uri, uri=True)) as db:
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA query_only=ON')
+        db.execute('BEGIN')
         rows = db.execute(
-            'SELECT event_id,raw_event_id,role,content,epoch_id,status,kind,metadata_json '
+            'SELECT rowid AS position,event_id,raw_event_id,role,content,epoch_id,status,kind,metadata_json '
             'FROM message_records WHERE status=? AND role IN (\'user\',\'assistant\') '
             'AND kind IN (\'message\',\'proactive_message\',\'legacy_display\') '
             'AND (' + ' OR '.join(clauses) + ')', ('active', *args),
         ).fetchall()
-    events = []
-    for row in rows:
-        try:
-            metadata = json.loads(row['metadata_json'] or '{}')
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(metadata, dict) or metadata.get('channel', 'main') != 'main':
-            continue
-        events.append(dict(event_id=row['event_id'], raw_event_id=row['raw_event_id'],
-                           role=row['role'], content=row['content'], epoch_id=row['epoch_id'],
-                           status=row['status'], authored_text=metadata.get('authored_text')))
+        events = []
+        for row in rows:
+            try:
+                metadata = json.loads(row['metadata_json'] or '{}')
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(metadata, dict) or metadata.get('channel', 'main') != 'main':
+                continue
+            authored = metadata.get('authored_text')
+            event = dict(event_id=row['event_id'], raw_event_id=row['raw_event_id'], role=row['role'],
+                         content=row['content'], epoch_id=row['epoch_id'], status=row['status'], authored_text=authored)
+            if (ids and row['event_id'] == previous and row['role'] == 'assistant'
+                    and row['epoch_id'] == request.get('current_epoch_id')
+                    and acknowledged_followup(request.get('user_text'), row['content'] if authored is None else authored)):
+                # 只穿过一句应声。前一条必须实际可见，不能从未进入窗口的历史找选项。
+                neighbor = db.execute(
+                    "SELECT event_id,raw_event_id,role FROM message_records WHERE epoch_id=? AND rowid<? "
+                    "AND status='active' AND kind IN ('message','proactive_message','legacy_display') "
+                    "AND role IN ('user','assistant') ORDER BY rowid DESC LIMIT 1",
+                    (row['epoch_id'], row['position'])).fetchone()
+                if neighbor and neighbor['role'] == 'user' and neighbor['raw_event_id'] in ids:
+                    event['preceding_user'] = neighbor['event_id']
+            events.append(event)
     return events
 
 
@@ -129,6 +145,14 @@ def map_canonical_sources(application, agent_id, app_id, request, canonical_even
             conversation_id = row['conversation_id']
     for raw_id in ambiguous_raw:
         mapping.pop(raw_id, None)
+    if previous:
+        predecessor = candidates[previous['source_event_id']].get('preceding_user')
+        earlier = candidates.get('canonical:' + predecessor) if predecessor else None
+        if earlier and earlier['role'] == 'user':
+            ref = mapping.get(earlier.get('raw_event_id'))
+            if ref and ref['source_event_id'] == 'canonical:' + predecessor:
+                body = earlier.get('authored_text')
+                previous['acknowledged_user_ref'] = dict(ref, text=earlier['content'] if body is None else body)
     return dict(raw_to_archive=mapping, previous_assistant_ref=previous,
                 conversation_id=conversation_id)
 
@@ -167,23 +191,25 @@ def recall_vnext(application, agent_id, app_id, request, *, surface='normal',
                 and ref['version'] > 0)
 
     visible = []
-    # 没有可见的旧 RawEvent 时无须凭空要求映射表；有旧 ID 则必须完整映射。
-    missing = False
+    missing = []
     for raw_id in request.get('visible_raw_event_ids', ()):
         ref = (raw_to_archive or {}).get(raw_id) if type(raw_id) is int else None
         if not scoped(ref):
-            missing = True
+            missing.append(raw_id)
         else:
             visible.append(ref['source_event_id'])
     trace = dict(surface=surface, generation_key=request.get('generation_key'),
                  provider_round=request.get('provider_round'),
                  scope=dict(agent_id=agent_id, app_id=app_id, channel=channel))
-    if missing:
+    if missing and (not visible or surface != 'normal' or not isinstance(application, NiannianReadOnlyRecall)
+                    or any(type(raw) is not int or raw <= 0 or raw in (raw_to_archive or {}) for raw in missing)):
         trace.update(errors=[dict(code='unmapped_raw_events')], memories=[], archive=[])
         return dict(rendered='', trace=trace)
 
     common = dict(channel=channel, visible_archive_ids=visible,
                   visible_memory_ids=request.get('exclude_memory_card_ids', ()))
+    if missing:
+        common['unmapped_raw_ids'] = frozenset(missing)
     if surface == 'normal':
         host = None
         raw_id = request.get('previous_assistant_event_id')
@@ -207,6 +233,8 @@ def recall_vnext(application, agent_id, app_id, request, *, surface='normal',
         result = recall_for_intent(application, agent_id, app_id, surface=surface,
                                    context=context, **common)
     trace.update({k: v for k, v in result.items() if k != 'rendered'})
+    if missing:
+        trace['errors'] = [*trace.get('errors', ()), dict(code='unmapped_raw_events')]
     # 真实 context_assembly._memory_vnext_source_refs 只读取 trace.related
     # 的 memory_refs/raw_event_ids；不能仅将未消费的 memories 存进 trace。
     memory_refs = [
@@ -240,7 +268,9 @@ def recall_vnext(application, agent_id, app_id, request, *, surface='normal',
                     raw_refs.append(row[0])
     trace['related'] = dict(memory_refs=memory_refs, raw_event_ids=raw_refs)
     rendered = result['rendered']
-    if ambient_state is not None and surface != 'preaction':
+    if (ambient_state is not None and not missing and surface != 'preaction'
+            and not (result.get('preference_correction') or result.get('unresolved_reference'))
+            and not (surface == 'normal' and constrained_quote_request(request.get('user_text', '')))):
         mode = 'normal' if surface == 'normal' else 'proactive'
         context_text = (request.get('user_text', '') if mode == 'normal'
                         else request.get('now_text', '') or request.get('recent_user_text', ''))
@@ -320,17 +350,21 @@ class NiannianReadOnlyRecall:
     page = staticmethod(_Application.page)
     del _Application
 
-    def search(self, agent_id, app_id, query, channel='main', *, limit=20, offset=0):
+    def search(self, agent_id, app_id, query, channel='main', *, limit=20, offset=0, user_quotes=False, quote_role=None):
         from thalemora.retrieval.core import _ro
         self.page(limit, offset)
         self.archive(agent_id, app_id, channel)
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200:
             raise ValueError('词法查询须为 1..200 个字符')
         with _ro(str(self.path)) as db:
+            role = quote_role or ("user" if user_quotes else None)
+            role_args = (role,) if role else ()
+            order = ("AND role=? ORDER BY julianday(occurred_at) DESC, source_event_id "
+                     if role else "ORDER BY source_event_id ")
             return [dict(row) for row in db.execute(
                 'SELECT * FROM history_events WHERE app=? AND channel=? AND deleted=0 '
-                'AND instr(lower(text),lower(?))>0 ORDER BY source_event_id LIMIT ? OFFSET ?',
-                (app_id, channel, query.strip(), limit, offset))]
+                'AND instr(lower(text),lower(?))>0 ' + order + 'LIMIT ? OFFSET ?',
+                (app_id, channel, query.strip(), *role_args, limit, offset))]
 
     def evidence(self, agent_id, app_id, card_id, channel='main', *, limit=20, offset=0):
         self.page(limit, offset)
@@ -405,7 +439,17 @@ class NiannianReadOnlyRecall:
                 return False
         return True
 
-    def _rows(self, visible_archive_ids):
+    @staticmethod
+    def _disjoint_from_unmapped(active, raw_ids):
+        # 映射不全时，只有人工独立修订或已知不相交的完整原始区间可以使用。
+        return bool(active) and all(
+            item['resolution'] in {'manual_note', 'manual_revision'}
+            or (type(start := item.get('raw_event_start_id')) is int
+                and type(end := item.get('raw_event_end_id')) is int and 0 < start <= end
+                and all(not start <= raw <= end for raw in raw_ids))
+            for item in active)
+
+    def _rows(self, visible_archive_ids, *, unmapped_raw_ids=()):
         from thalemora.retrieval.recall import scoped_rows
         from thalemora.adapters.niannian_retrieval import NiannianRetrievalIndex
         from thalemora.retrieval.core import _ro
@@ -450,7 +494,8 @@ class NiannianReadOnlyRecall:
                     continue
                 legacy = [e for e in evidence if e['resolution'] == 'legacy_unverified']
                 # shortcut: 无可核对 Raw 范围的旧证据遇已见原话时整卡排除，待宿主提供可信映射后再放宽。
-                if visible_archive_ids and (any(type(visible_raw.get(s)) is not int for s in visible_archive_ids) or any(
+                if visible_archive_ids and any(e['resolution'] == 'legacy_unverified' for e in active) and (
+                        any(type(visible_raw.get(s)) is not int for s in visible_archive_ids) or any(
                         type(e['raw_event_start_id']) is not int
                         or type(e['raw_event_end_id']) is not int
                         or e['raw_event_start_id'] > e['raw_event_end_id']
@@ -459,11 +504,16 @@ class NiannianReadOnlyRecall:
                     continue
                 row['provenance']['legacy_unverified'] = True
                 rows.append(row)
-                refs[row['source_key']] = {tuple(e['source_key']) for e in evidence if e['source_key']}
-            suppressed.update(key for keys in refs.values() for key in keys)
+                refs[row['source_key']] = {tuple(e['source_key']) for e in active if e['source_key']}
+                suppressed.update(tuple(e['source_key']) for e in evidence if e['source_key'])
+            if unmapped_raw_ids:
+                rows = [r for r in rows if 'extension_id' not in r['provenance']
+                        and self._disjoint_from_unmapped(
+                            [e for e in evidence_by_card.get(r['source_id'], ())
+                             if e['revision_id'] == r['provenance']['revision_id']], unmapped_raw_ids)]
             return rows, refs, suppressed
 
-    def _indexed_rows(self, candidates, visible_archive_ids):
+    def _indexed_rows(self, candidates, visible_archive_ids, *, unmapped_raw_ids=()):
         """只解引用排名候选；索引过期时拒绝，不在聊天中修复后台索引。"""
         from thalemora.memory.scopes import ownership, belongs
         from thalemora.retrieval.core import _ro, _sha
@@ -498,7 +548,7 @@ class NiannianReadOnlyRecall:
                     'SELECT source_event_id,raw_event_id FROM history_events WHERE app=? AND channel=? '
                     'AND source_event_id IN (' + ','.join('?' for _ in visible) + ')',
                     (self.app_id, 'main', *visible))}
-            rows, refs = [], {}
+            rows, refs, suppressed = [], {}, set()
             for candidate in candidates:
                 cid = candidate['source_id']
                 card = current.get(cid)
@@ -522,11 +572,12 @@ class NiannianReadOnlyRecall:
                 allowed = {'current', 'manual_revision'}
                 if scope['state'] == 'unknown':
                     allowed.add('legacy_unverified')
-                if (not active or any(e['resolution'] == 'outside_scope' for e in items)
+                if (not active or (unmapped_raw_ids and not self._disjoint_from_unmapped(active, unmapped_raw_ids))
+                        or any(e['resolution'] == 'outside_scope' for e in items)
                         or any(e['resolution'] not in allowed for e in active)):
                     continue
                 legacy = [e for e in items if e['resolution'] == 'legacy_unverified']
-                if visible_archive_ids and legacy and (
+                if visible_archive_ids and any(e['resolution'] == 'legacy_unverified' for e in active) and (
                         any(type(visible_raw.get(s)) is not int for s in visible_archive_ids)
                         or any(type(e['raw_event_start_id']) is not int
                                or type(e['raw_event_end_id']) is not int
@@ -539,20 +590,23 @@ class NiannianReadOnlyRecall:
                 if scope['state'] == 'unknown':
                     row['provenance']['legacy_unverified'] = True
                 rows.append(row)
-                refs[row['source_key']] = {tuple(e['source_key']) for e in items if e['source_key']}
-            return rows, refs, {key for keys in refs.values() for key in keys}
+                refs[row['source_key']] = {tuple(e['source_key']) for e in active if e['source_key']}
+                suppressed.update(tuple(e['source_key']) for e in items if e['source_key'])
+            return rows, refs, suppressed
 
     def ambient_for_turn(self, engine, **host_state):
         from thalemora.adapters.niannian_ambient import ambient_for_turn
         return ambient_for_turn(self, engine, **host_state)
 
-    def recall_for_turn(self, agent_id, app_id, query, channel='main', **visible):
+    def recall_for_turn(self, agent_id, app_id, query, channel='main', *, unmapped_raw_ids=(), **visible):
         from thalemora.retrieval.recall import recall_for_turn
         self.archive(agent_id, app_id, channel)
         from thalemora.retrieval.core import _ro
         if self._host_index:
             return recall_for_turn(self, agent_id, app_id, query, channel,
-                                   indexed_memory_rows=self._indexed_rows,
+                                   indexed_memory_rows=(partial(self._indexed_rows, unmapped_raw_ids=unmapped_raw_ids)
+                                                        if unmapped_raw_ids else self._indexed_rows),
+                                   cards_only=bool(unmapped_raw_ids),
                                    index_path=self.index_path, **visible)
         # data_version 只在同一连接上可比较；缓存与观察连接均仅存活本轮。
         with _ro(str(self._memory_path)) as memory_db, _ro(str(self.path)) as archive_db:
@@ -563,9 +617,11 @@ class NiannianReadOnlyRecall:
                 current = (memory_db.execute('PRAGMA data_version').fetchone()[0],
                            archive_db.execute('PRAGMA data_version').fetchone()[0])
                 if cached is None or current != versions:
-                    cached = self._rows(effective_visible_archive_ids)
+                    cached = (self._rows(effective_visible_archive_ids, unmapped_raw_ids=unmapped_raw_ids)
+                              if unmapped_raw_ids else self._rows(effective_visible_archive_ids))
                     versions = current
                 return cached
 
             return recall_for_turn(self, agent_id, app_id, query, channel,
-                                   memory_rows=read_rows, index_path=self.index_path, **visible)
+                                   memory_rows=read_rows, index_path=self.index_path,
+                                   cards_only=bool(unmapped_raw_ids), **visible)

@@ -49,6 +49,81 @@ class ConnectorTests(unittest.TestCase):
         return self.client.post("/api/recall", headers=self.headers,
                                 json={"message": "以前喜欢什么茶？", **updates})
 
+    def chat_text(self, message, history=(), **visible):
+        response = self.recall(message=message, visible_texts=[*history, message], **visible)
+        self.assertEqual(response.status_code, 200, response.text)
+        text = response.json()['rendered']
+        self.assertLessEqual(len(text), 700)
+        return text
+
+    def note(self, text):
+        return self.service.add_manual_memory(self.agent, 'demo', text)
+
+    def test_long_chat_question_preserves_ending_at_http_entry(self):
+        self.note("夜航书店预订时要出示木牌。")
+        message = "我们已经聊完刚才的话题了。" * 25 + "所以夜航书店怎么预订？"
+        self.assertGreater(len(message), 200)
+        self.assertIn("出示木牌", self.chat_text(message))
+
+    def test_chat_topic_or_acknowledgement_is_not_the_whole_memory(self):
+        tea = '我喜欢乌龙茶，常去松枝茶铺，通常要提前预订。'
+        self.note(tea)
+        self.note('因为脚架需要提前约好，望远镜一直寄放在二楼。')
+        self.assertIn('松枝茶铺', self.chat_text('乌龙茶'))
+        self.assertIn('二楼', self.chat_text('望远镜放哪了？', ['好']))
+        self.assertEqual('', self.chat_text('乌龙茶', [tea]))
+
+    def test_quote_constraints_and_last_occurrence_in_chat(self):
+        events = [
+            dict(source_event_id=f'a-{i}', occurred_at='2026-05-20T00:00:00Z',
+                 role='user', text='我在山脚找到蓝色风铃，准备捐给学校。') for i in range(40)]
+        events += [dict(source_event_id='z', occurred_at='2026-10-20T00:00:00Z',
+                        role='user', text='我在阳台挂了蓝色风铃，准备留作纪念。'),
+                   dict(source_event_id='oct', occurred_at='2026-10-20T00:00:00Z',
+                        role='assistant', text='我推荐翡翠步道，入口在东边。')]
+        self.service.import_history(self.agent, 'demo',
+            [dict(app='demo', channel='main', version=1, **event) for event in events])
+        question = '我上次关于“蓝色风铃”的原话是什么？'
+        text = self.chat_text(question)
+        self.assertIn('阳台', text)
+        self.assertNotIn('学校', text)
+        self.assertEqual('', self.chat_text(question, visible_archive_ids=['z']))
+        july = '我七月当时的原话是什么，关于“翡翠步道”？'
+        self.service.import_history(self.agent, 'demo', [
+            dict(app='demo', channel='main', version=1, source_event_id='july-assistant',
+                 occurred_at='2026-07-01T00:00:00Z', role='assistant', text='走翡翠步道北门。'),
+            dict(app='demo', channel='main', version=1, source_event_id='oct-user',
+                 occurred_at='2026-10-01T00:00:00Z', role='user', text='我十月走翡翠步道西门。')])
+        self.assertEqual('', self.chat_text(july))
+        self.service.import_history(self.agent, 'demo', [
+            dict(app='demo', channel='main', version=1, source_event_id='july-user',
+                 occurred_at='2026-07-02T00:00:00Z', role='user', text='我走翡翠步道南门。')])
+        self.assertIn('我走翡翠步道南门。', self.chat_text(july))
+
+    def test_specific_topic_survives_common_term_in_either_order(self):
+        for i in range(26):
+            self.note(f'周末修理自行车，第{i}次更换零件。')
+        self.note('周末观星用的望远镜保存在二楼。')
+        for query in ('周末，望远镜放在哪里？', '望远镜，周末放在哪里？'):
+            text = self.chat_text(query)
+            self.assertIn('保存在二楼', text)
+            self.assertNotIn('自行车', text)
+
+    def test_long_memory_displays_the_matching_passage(self):
+        self.note('这是上次旅行沿途的普通见闻。' * 24 + '诗集寄存在紫藤书屋。')
+        text = self.chat_text('诗集寄存在哪里？')
+        self.assertIn('诗集寄存在紫藤书屋。', text)
+        self.assertNotIn('普通见闻', text)
+
+    def test_visible_old_event_does_not_hide_independent_correction(self):
+        self.insert('old', '以前每周三去东馆看书。')
+        card = self.service.remember(self.agent, 'demo', 'old')
+        self.service.revise_memory(self.agent, 'demo', card['card_id'],
+            '现在自习改去紫藤书屋，每周一开放。', card['current_revision_id'])
+        text = self.chat_text('紫藤书屋什么时候开放？', visible_archive_ids=['old'])
+        self.assertIn('每周一开放', text)
+        self.assertNotIn('东馆', text)
+
     def test_admin_issue_revoke_persistence_and_hash_only(self):
         for headers in ({}, self.headers):
             for op, args in (("issue_recall_token", dict(agent_id=self.agent, app_id="demo")),
@@ -113,7 +188,7 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(self.service.providers.audit(), [])
 
     def test_http_validation_and_failures_are_explicit_and_redacted(self):
-        for body in ([], {}, {"message": None}, {"message": "x" * 201},
+        for body in ([], {}, {"message": None}, {"message": "x" * 8193},
                      {"message": "", "visible_memory_ids": [True]},
                      {"message": "", "visible_archive_ids": "x"},
                      {"message": "", "visible_texts": [1]}):

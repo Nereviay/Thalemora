@@ -17,6 +17,7 @@ from starlette.staticfiles import StaticFiles
 from .providers import ProviderUnavailable
 from .mcp import create_mcp
 from .recall_tokens import InvalidRecallToken
+from thalemora.retrieval.turn_context import MAX_TURN_CHARS
 
 RECALL_TIMEOUT_SECONDS = 5
 
@@ -120,7 +121,7 @@ def create_http(service, token):
             allowed = {"message", "visible_memory_ids", "visible_archive_ids", "visible_texts"}
             if not isinstance(args, dict) or set(args) - allowed or "message" not in args:
                 return failure(400, "invalid_request")
-            if not isinstance(args["message"], str) or len(args["message"]) > 200:
+            if not isinstance(args["message"], str) or len(args["message"]) > MAX_TURN_CHARS:
                 return failure(400, "invalid_message")
             for key, item_type in (("visible_memory_ids", int), ("visible_archive_ids", str),
                                    ("visible_texts", str)):

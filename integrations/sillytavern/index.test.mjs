@@ -135,7 +135,7 @@ test('去重：提交实际可见正文，固定槽位替换，重复生成不�
 test('未配置、无用户消息和超过接口长度时跳过，不截断问题', async () => {
     const adapter = host(() => assert.fail('不应请求召回'));
     await adapter.generate([{ mes: '助手' }]);
-    await adapter.generate([user('字'.repeat(201))]);
+    await adapter.generate([user('字'.repeat(8193))]);
     // 新页面默认未配置，仍可正常聊天。
     const sandbox = vm.createContext({
         SillyTavern: { getContext: () => ({ extensionSettings: {}, setExtensionPrompt() {} }) },

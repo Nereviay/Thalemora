@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from thalemora.app.providers import ProviderUnavailable
 from thalemora.app.recall_tokens import InvalidRecallToken
+from thalemora.retrieval.turn_context import MAX_TURN_CHARS
 import test_p8_recall as fixtures
 
 
@@ -28,7 +29,8 @@ def isolated_route(service):
     route = next(n for n in create.body if isinstance(n, ast.AsyncFunctionDef) and n.name=='recall')
     code = compile(ast.fix_missing_locations(ast.Module(body=[route],type_ignores=[])),str(path),'exec')
     namespace = dict(service=service,partial=partial,json=json,anyio=anyio,JSONResponse=JSONResponse,
-        InvalidRecallToken=InvalidRecallToken,ProviderUnavailable=ProviderUnavailable,RECALL_TIMEOUT_SECONDS=5)
+        InvalidRecallToken=InvalidRecallToken,ProviderUnavailable=ProviderUnavailable,RECALL_TIMEOUT_SECONDS=5,
+        MAX_TURN_CHARS=MAX_TURN_CHARS)
     exec(code,namespace)
     return namespace['recall']
 

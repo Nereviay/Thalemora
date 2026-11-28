@@ -176,6 +176,31 @@ class RecallTests(unittest.TestCase):
         self.assertEqual(result, baseline)
         self.assertLessEqual(len(result['rendered']), 700)
 
+    def test_original_quotes_keep_role_and_observer_calendar(self):
+        rows = [self.event("assistant", "紫藤花架留在西厅。") |
+                dict(role="assistant", occurred_at="2026-10-31T15:20:00Z"),
+                self.event("user", "紫藤花架留在东厅。") |
+                dict(occurred_at="2026-11-01T09:00:00+09:00")]
+        self.app.import_history(self.agent, "demo", rows)
+        query = "你十一月当时的原话是什么，关于“紫藤花架”？"
+        # 明确称呼说话人，月份以观察者的日历为准。
+        with patch.dict(os.environ, THALEMORA_RECALL_TIMEZONE="Asia/Seoul"):
+            for question in (query, "你上次关于“紫藤花架”怎么说的？", "你说过的原话是什么，关于“紫藤花架”？"):
+                self.assertEqual(["assistant"], [r["id"] for r in self.recall(question)["archive"]])
+            self.assertEqual(["user"], [r["id"] for r in self.recall(
+                "我上次跟你说的原话是什么，关于“紫藤花架”？")["archive"]])
+            self.assertEqual("", self.recall(query, visible_archive_ids=["assistant"])["rendered"])
+        with patch.dict(os.environ, THALEMORA_RECALL_TIMEZONE="UTC"):
+            self.assertEqual("", self.recall(query)["rendered"])
+
+    def test_last_arrangement_requires_matching_action_and_conversation(self):
+        for i, text in enumerate(("蓝色纸箱寄给东门。", "蓝色纸箱换了标签。")):
+            event = self.event(f"event-{i}", text) | {"occurred_at": f"2026-10-{10+i}T09:00:00Z"}
+            self.app.import_history(self.agent, "demo", [event])
+        query = "上次蓝色纸箱约好要寄到哪里来着？"
+        self.assertEqual(["event-0"], [r["id"] for r in self.recall(query)["archive"]])
+        self.assertEqual("", self.recall("这段对话里，" + query)["rendered"])
+
     def test_m07_true_user_quote_without_models_or_memory_merge(self):
         self.card('summary', '我喜欢合成红茶')
         self.insert('quote', '我和那个朋友认识十年，仍然常聊合成天文。')
@@ -619,12 +644,54 @@ class RecallTests(unittest.TestCase):
     def test_short_reference_pure_decision_is_conservative(self):
         prior = "1、茉莉花茶\n2、乌龙茶"
         self.assertEqual(prior_assistant_query("第二个呢？", prior), "乌龙茶")
+        self.assertEqual(prior_assistant_query("第二个呢？", "茉莉花茶或者乌龙茶"), "乌龙茶")
         for query, text in (("那个呢？", prior), ("第三个呢？", prior),
-                            ("第二个呢？", "茉莉花茶或者乌龙茶"),
+                            ("后面那个呢？", "茉莉花茶或者乌龙茶或者红茶"),
+                            ("不是后面那个，我说的是后面那个。", prior),
                             ("第二个呢？", "1、甲\n2、乙\n2、丙")):
             self.assertEqual(prior_assistant_query(query, text), query)
         self.assertEqual(prior_assistant_query("我没玩过那两个游戏", "你玩甲游戏还是乙游戏？"), "我平常玩什么游戏？")
         self.assertEqual(prior_assistant_query("我没玩过那两个游戏", "猜测的上文"), "我没玩过那两个游戏")
+
+    def test_current_preference_uses_only_newer_first_person_changes(self):
+        card = self.card('habit', '我平时喝深焙咖啡。')
+        path = self.app.memory_path(self.agent, 'demo', 'main')
+        before = path.read_bytes()
+        query = '我平时喝什么咖啡？'
+        def add(key, text, day, **fields):
+            event = self.event(key, text)
+            event.update(occurred_at=f'2026-10-{day}T09:00:00Z', **fields)
+            self.app.import_history(self.agent, 'demo', [event])
+        add('old', '现在换成中焙了，不再喝深焙咖啡。', 12)
+        add('today', '今天想喝浅焙咖啡。', 17)
+        add('other-speaker', '现在换成浅焙了，不再喝深焙咖啡。', 18, role='assistant')
+        result = self.recall(query)
+        self.assertEqual([m['id'] for m in result['memories']], [card['card_id']])
+        self.assertEqual(result['archive'], [])
+        add('change', '现在换成浅焙了，不再喝深焙咖啡。', 19)
+        result = self.recall(query)
+        self.assertEqual(result['memories'], [])
+        self.assertEqual([a['id'] for a in result['archive']], ['change'])
+        self.assertEqual(self.recall(query, visible_archive_ids=['change'])['rendered'], '')
+        add('next', '现在换成中焙了，不再喝浅焙咖啡。', 20)
+        self.assertEqual([a['id'] for a in self.recall(query)['archive']], ['next'])
+        add('back', '我又换回深焙咖啡了。', 21)
+        result = self.recall(query)
+        self.assertEqual([a['id'] for a in result['archive']], ['back'])
+        self.assertNotIn('中焙', result['rendered'])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_quote_uses_trusted_conversation_before_selecting_latest(self):
+        context = self.prior_context()
+        for day, conv, box in ((20, 'synthetic', '木匣'), (22, 'other', '铁盒')):
+            event = self.event(box, f'合成邮票放在{box}。')
+            event.update(occurred_at=f'2026-10-{day}T08:00:00Z', conversation_id=conv)
+            self.app.import_history(self.agent, 'demo', [event])
+        query = '这次聊天里，我上次关于“合成邮票”的原话是什么？'
+        self.assertIn('放在木匣', self.recall(query, host_context=context)['rendered'])
+        self.assertEqual('', self.recall(query)['rendered'])
+        self.assertEqual('', self.recall(query, host_context=dict(context, conversation_id='other'))['rendered'])
+        self.assertIn('放在铁盒', self.recall('我上次关于“合成邮票”的原话是什么？', host_context=context)['rendered'])
 
     def test_lexical_related_unrelated_low_information_and_visible(self):
         card = self.card("tea", "我喜欢乌龙茶")

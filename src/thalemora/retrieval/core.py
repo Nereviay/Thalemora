@@ -650,9 +650,13 @@ class RetrievalIndex:
         if lexical_queries is None:
             lexical = self._lexical_hits(query, source_kind, pool)
         else:
-            lexical = list(dict.fromkeys(key for term in lexical_queries
-                                        for key, _ in self._lexical_hits(term, source_kind, pool, literal=True)))[:pool]
-            lexical = [(key, 0.0) for key in lexical]
+            # 所有词先投票再截断。命中少的词更能区分主题，同词仍保留索引内名次。
+            weights = {}
+            for term in sorted(set(lexical_queries)):
+                hits = self._lexical_hits(term, source_kind, pool, literal=True)
+                for rank, (key, _) in enumerate(hits, 1):
+                    weights[key] = weights.get(key, 0.0) + 1 / (len(hits) * (60 + rank))
+            lexical = sorted(weights.items(), key=lambda hit: (-hit[1], hit[0]))[:pool]
         vector = []
         if embedder is not None:
             vector = self._vector_hits(embedder.encode_one(query), source_kind, pool)

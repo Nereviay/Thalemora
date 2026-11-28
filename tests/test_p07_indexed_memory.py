@@ -6,7 +6,7 @@ from contextlib import closing, contextmanager
 from unittest.mock import patch
 
 import test_p07_legacy_memory as fixture
-from thalemora.adapters.niannian_vnext import NiannianReadOnlyRecall
+from thalemora.adapters.niannian_vnext import NiannianReadOnlyRecall, recall_vnext
 from thalemora.retrieval.core import RetrievalIndex, RetrievalShadowError, _ro
 
 
@@ -77,6 +77,52 @@ class IndexedMemoryTests(unittest.TestCase):
         on_topic = self.app.recall_for_turn('chenlin', 'niannian', '上次 账号 申诉')
         self.assertEqual([a['id'] for a in on_topic['archive']], ['canonical:appeal'])
         self.assertEqual([], self.providers.audit())
+
+    def test_partial_raw_mapping_excludes_overlapping_cards_and_all_quotes(self):
+        self.card(text="布展柜体在南厅。")  # 旧卡证据区间为 RawEvent 72
+        self.event("seen", raw=801)
+        self.archive.import_history([dict(app="niannian", channel="main", version=1,
+            source_event_id="pending", text="布展柜体在别处。", role="user")])
+        self.indexed()
+        mapping = {801: dict(agent_id="chenlin", app_id="niannian", channel="main",
+                             source_event_id="seen", version=1)}
+        def ask(question, missing):
+            return recall_vnext(self.app, "chenlin", "niannian", dict(
+                user_text=question, visible_raw_event_ids=[801, missing]), raw_to_archive=mapping)
+        self.assertIn("南厅", ask("布展柜体在哪里？", 999)["rendered"])
+        self.assertEqual("", ask("布展柜体在哪里？", 72)["rendered"])
+        self.assertEqual("", ask("我上次关于“布展柜体”的原话是什么？", 999)["rendered"])
+
+    def test_short_location_question_uses_a_specific_topic_in_the_body(self):
+        from thalemora.adapters.niannian_vnext import recall_vnext
+        from test_p07_bridge_gate import final_messages
+        card = self.card(text='收拾书房时把望远镜放在了二楼的蓝柜里。')
+        with closing(sqlite3.connect(self.memory)) as db, db:
+            db.execute('UPDATE cards SET title=?,keywords=? WHERE id=?',
+                       ('整理书房', '书房，收纳', card['card_id']))
+        self.indexed()
+        for question in ('望远镜放哪了？', '之前望远镜放哪了？'):
+            result = recall_vnext(self.app, 'chenlin', 'niannian', dict(user_text=question))
+            _, messages = final_messages(result, question)
+            self.assertIn('二楼的蓝柜里', messages[-1]['content'])
+            self.assertIn('证据未核实', messages[-1]['content'])
+
+    def test_visible_old_source_keeps_current_confirmed_revision(self):
+        from thalemora.memory.revision_store import update_card
+        self.event('old')
+        scope = dict(app='niannian', channel='main', agent_id='chenlin')
+        card = self.card('derived', json.dumps(dict(scope, kind='archive_quote',
+                         source_event_id='old', version=1)), text='以前每周三去东馆看书。')
+        update_card(self.memory, card_id=card['card_id'],
+                    expected_current_revision_id=card['current_revision_id'], origin='manual_ui',
+                    content='现在自习改去紫藤书屋，每周一开放。', change_type='manual_edit',
+                    evidence_source_kind='manual',
+                    evidence_source_ref=json.dumps(dict(scope, kind='mcp_explicit_manual_revision')))
+        self.indexed()
+        result = self.app.recall_for_turn('chenlin', 'niannian', '之前紫藤书屋什么时候开放？',
+                                          visible_archive_ids=['old'])
+        self.assertIn('每周一开放', result['rendered'])
+        self.assertNotIn('东馆', result['rendered'])
 
     def test_host_long_raw_history_rejects_tail_only_match(self):
         text = '这是合成的无关旧记录。' * 30 + '账号 申诉 平台'

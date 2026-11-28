@@ -4,7 +4,7 @@ async function onPromptFinalize(input) {
     const event = input.eventPayload || {};
     if (String(event.stage || input.eventName || '') !== 'before_send_to_model') return null;
     const message = String(event.rawInput || event.processedInput || '');
-    if (!message.trim() || Array.from(message).length > 200) return null;
+    if (!message.trim() || Array.from(message).length > 8192) return null;
     const started = Date.now();
     try {
         const config = settings.load();

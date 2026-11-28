@@ -3,10 +3,14 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
 import math
+import os
 import re
 import sqlite3
+from zoneinfo import ZoneInfo
 
-from .facts import statement, compare_statement, render_hint
+from .facts import statement, compare_statement, render_hint, preference_evidence, preference_change
+from .turn_context import (MAX_TURN_CHARS, acknowledged_followup, prior_assistant_query,
+                           question_focus, reference_request, trusted_previous_text)
 from .bm25 import tokenize
 from .core import RetrievalIndex
 from .models import configured_model, AvailableEmbedder
@@ -41,47 +45,139 @@ def normalized(text):
     return re.sub(r"\W+", "", text.lower())
 
 
+def separately_named_titles(query, rows):
+    marker = re.search(r"分别|各自", query)
+    if not marker:
+        return ()
+    prefix = query[:marker.start()].rstrip()
+    titles = {row['title'].strip() for row in rows if row.get('title') and len(row['title'].strip()) >= 2}
+    pairs = set()
+    for second in titles:
+        if not prefix.endswith(second):
+            continue
+        join = re.search(r"(?:和|与|以及|、|跟)\s*$", prefix[:-len(second)])
+        if join:
+            first_part = prefix[:join.start()].rstrip()
+            pairs.update((first, second) for first in titles if first != second and first_part.endswith(first))
+    return pairs.pop() if len(pairs) == 1 else ()
+
+
+def excerpt(text, terms, limit=300):
+    """展示最相关原句及附近正文；没有字面命中时保留原来的开头。"""
+    if len(text) <= limit:
+        return text
+    start, best = 0, 0
+    for sentence in re.finditer(r'[^。！？!?\n]+[。！？!?]?', text):
+        body = sentence[0].lower()
+        hits = [t for t in terms if t in body]
+        if len(hits) <= best:
+            continue
+        best = len(hits)
+        if len(body) <= limit:
+            # 窗口至少包含整句，避免恰好在命中词与答案之间截断。
+            start = 0 if sentence.end() <= limit else sentence.start()
+        else:
+            anchor = sentence.start() + body.index(max(hits, key=len))
+            start = max(sentence.start(), anchor - limit // 2)
+        if best == len(terms):
+            break
+    return text[start:start + limit]
+
+
+_LAST_AGREEMENT = re.compile(
+    r"(?:上次|上回|最近一次)[，,\s]*(?:我们|咱们)?(?:关于)?"
+    r"(?P<topic>[\w·-]{2,30}?)(?<!的)(?:约好|约定|说好|商量好)(?:的|了)?"
+    r"(?P<question>[^。！？!?]{0,40}(?:哪|什么|怎么|几|谁)[^。！？!?]{0,12})[？?]?$")
+_QUOTE_SUBJECT = re.compile(
+    r'(?<![跟对向和])(?P<who>助手|用户|你|我)(?=的(?:那句)?原话|关于|当时|那时|上次|上回|'
+    r'以前|之前|昨天|前天|今天|(?:在)?[0-9一二三四五六七八九十]{1,3}月|(?:怎么)?(?:说|提|讲))')
+
+
+def _asks_past_words(query):
+    return (('“' in query or '「' in query or '"' in query)
+            and bool(re.search(r'怎么(?:说|讲)的|(?:说|讲|提)(?:了|过)?(?:什么|啥)', query))
+            and bool(_QUOTE_SUBJECT.search(query)))
+
+
+def constrained_quote_request(query):
+    return (current_conversation_quote(query)
+            or ('原话' in query and bool(re.search(r'我|你的|助手|上次|当时|那时|以前|之前|月|年|[“「"]', query)))
+            or bool(re.search(r'我(?:当时|那时|以前|之前|上次).{0,50}提过.{0,8}(?:什么|啥)', query))
+            or bool(_LAST_AGREEMENT.search(query)) or _asks_past_words(query))
+
+
 def original_quote_request(query):
-    return bool(re.search(r"(?:当时|那时|以前|之前|上次).{0,24}原话|原话.{0,12}(?:怎么说|是什么)|我(?:当时|那时|以前|之前|上次).{0,50}提过.{0,8}(?:什么|啥)", query))
+    return constrained_quote_request(query) or bool(re.search(r'原话.{0,12}(?:怎么说|是什么)', query))
 
 
 def recover_original(archive, application, agent_id, app_id, channel, query,
-                     visible_ids, visible_texts):
-    """M07：只用明确字面锚点恢复 user 原文；不提升 Memory 为原话。"""
+                     visible_ids, visible_texts, conversation_id=None):
+    """按说话人、字面锚点及本地日历恢复原始事件。"""
     if not original_quote_request(query):
         return None
-    quoted = re.findall(r'[“「"]([^”」"]{4,30})[”」"]', query)
+    quoted = re.findall(r'[“「"]([^”」"]{2,30})[”」"]', query)
+    request_text = re.sub(r'[“「"][^”」"]+[”」"]', '', query)
+    roles = {'assistant' if who in {'助手', '你'} else 'user' for who in _QUOTE_SUBJECT.findall(request_text)}
+    if len(roles) > 1:
+        return None
+    role = next(iter(roles), 'user')
     years = re.findall(r'(?:认识|相处|交往|学了|用了|玩了)(?:了|有)?[一二三四五六七八九十百0-9]{1,3}年', query)
     bare = re.fullmatch(r'我(?:当时|那时|以前|之前|上次)提过(.{4,30}?)(?:什么|啥)[？?]?', query)
-    anchors = quoted or years or ([bare[1].strip()] if bare else [])
+    agreement = _LAST_AGREEMENT.search(query)
+    anchors = quoted or years
+    action = ''
+    if not anchors and bare:
+        anchors = [bare[1].strip()]
+    elif not anchors and agreement:
+        anchors = [agreement['topic']]
+        question_head = re.split(r'哪|什么|怎么|几|谁', agreement['question'], maxsplit=1)[0]
+        action = re.sub(r'^(?:要|准备|打算|应该)|(?:到|在|给|向|往)$', '', question_head).strip()
     if len(anchors) != 1 or len(normalized(anchors[0])) < 4 or not query_terms(anchors[0]):
         return None
     anchor = anchors[0]
     # 未实现的相对窗口与年份不能偷偷退化成无时间约束的原话命中。
-    if re.search(r'去年|今年|前年|上个?月|这个月|本月|最近|过去|近[一二三四五六七八九十0-9]|上周|本周|昨天|前天|今天|\d{4}年|\d{4}[-/]|[0-9一二三四五六七八九十]+[日号]', query):
+    if re.search(r'去年|今年|前年|上个?月|这个月|本月|最近(?!一次)|过去|(?<!最)近[一二三四五六七八九十0-9]|上周|本周|\d{4}年|\d{4}[-/]|[0-9一二三四五六七八九十]+[日号]', request_text):
         return None
     month_pattern = r'(?<![0-9])(?:1[0-2]|[1-9]|十一|十二|[一二三四五六七八九十])月'
     words = dict(zip('一二三四五六七八九十', range(1, 11)), 十一=11, 十二=12)
     def months(text):
         return {int(m[:-1]) if m[:-1].isdigit() else words[m[:-1]]
                 for m in re.findall(month_pattern, text)}
-    requested = months(query)
-    if len(requested) > 1:
+    requested = months(request_text)
+    days = set(re.findall(r'今天|昨天|前天', request_text))
+    if len(requested) > 1 or len(days) > 1:
         return None
-    talking_month = bool(re.search(month_pattern + r'.{0,9}(?:说|聊|提|讲|原话)', query))
-    hits = application.search(agent_id, app_id, anchor, channel, limit=36)
+    talking_month = bool(re.search(month_pattern + r'.{0,9}(?:说|聊|提|讲|原话)', request_text))
+    zone_name = os.environ.get('THALEMORA_RECALL_TIMEZONE')
+    zone = ZoneInfo(zone_name) if zone_name and (days or talking_month) else None
+    day = None
+    if days:
+        days_ago = {'今天': 0, '昨天': 1, '前天': 2}[days.pop()]
+        day = datetime.now(zone).date() - timedelta(days=days_ago)
+
+    def candidates():
+        offset = 0
+        while True:
+            hits = application.search(agent_id, app_id, anchor, channel, limit=36, offset=offset,
+                                      quote_role=role)
+            yield from hits
+            if len(hits) < 36:
+                return
+            offset += len(hits)
+
     with closing(sqlite3.connect(archive.path)) as db:
         db.row_factory = sqlite3.Row
-        for hit in hits:
-            if hit['source_event_id'] in visible_ids:
-                continue
+        for hit in candidates():
             row = db.execute('SELECT * FROM history_events WHERE app=? AND channel=? AND source_event_id=?',
                              (app_id, channel, hit['source_event_id'])).fetchone()
-            if (not row or row['deleted'] or row['role'] != 'user'
+            if (not row or row['deleted'] or row['role'] != role
+                    or (conversation_id is not None and row['conversation_id'] != conversation_id)
                     or row['version'] != hit['version'] or row['text'] != hit['text']
-                    or anchor not in row['text'] or len(row['text']) > 240):
+                    or anchor not in row['text']):
                 continue
             text = row['text']
+            if action and action not in text and not re.search(r'取消|作废|不算数', text):
+                continue
             if ('朋友' in query and ('朋友' not in text
                     or ('朋友们' in query) != ('朋友们' in text))):
                 continue
@@ -96,60 +192,33 @@ def recover_original(archive, application, agent_id, app_id, channel, query,
                 continue
             if instant.tzinfo is None:
                 continue
-            if requested and (requested != {instant.month} if talking_month else not requested <= months(text)):
+            local_date = instant.astimezone(zone).date()
+            if day and local_date != day:
+                continue
+            if requested and (requested != {local_date.month} if talking_month else not requested <= months(text)):
                 continue
             norm = normalized(text)
-            if any(normalized(t) and (norm in normalized(t) or normalized(t) in norm) for t in visible_texts):
+            if (len(text) > 240 or row['source_event_id'] in visible_ids
+                    or any(norm in normalized(t) for t in visible_texts)):
+                if '上次' in query or agreement:
+                    return None
                 continue
             item = dict(kind='archive', id=row['source_event_id'], version=row['version'],
-                        text=text, role='user', occurred_at=row['occurred_at'])
-            line = f"[用户原话 {item['id']} v{item['version']} {item['occurred_at']}] {text}"
+                        text=text, role=role, occurred_at=row['occurred_at'])
+            label = '助手原话' if role == 'assistant' else '用户原话'
+            line = f"[{label} {item['id']} v{item['version']} {item['occurred_at']}] {text}"
             if len(line) <= 700:
                 return dict(rendered=line, memories=[], archive=[item], errors=[])
     return None
 
 
-def prior_assistant_query(query, previous):
-    """只解析明确编号的指代或对备选项的否认；无法确定就保留原问题。"""
-    ordinal = re.fullmatch(r"第([一二三四五六七八九1-9])个(?:呢|怎么样)?[？?]?", query.strip())
-    if ordinal:
-        number = ordinal[1]
-        wanted = int(number) if number.isdigit() else "一二三四五六七八九".index(number) + 1
-        options = re.findall(r"^\s*([1-9一二三四五六七八九])[、.．）)]\s*(.+)$", previous, re.M)
-        numbers = [int(n) if n.isdigit() else "一二三四五六七八九".index(n) + 1 for n, _ in options]
-        if numbers == list(range(1, len(options) + 1)) and wanted <= len(options):
-            text = options[wanted - 1][1].strip()
-            if 0 < len(text) <= 200:
-                return text
-    # 被否认的选项不能当作用户偏好；只用用户明说的动作/主题查已有记忆。
-    denial = re.fullmatch(r"我(?:从来|根本|压根)?(?:都)?(?:没|没有|不曾|不)"
-                          r"([玩看听吃喝用去读买做打])过?[这那](?:两个|两|俩|几)"
-                          r"(?:款|部|个|种|本)?([\u4e00-\u9fff]{2,5})[。！？!?]?", query.strip())
-    if denial and re.search(r"还是|或者|或是|\bor\b", previous, re.I):
-        verb, topic = denial.groups()
-        if topic not in {"东西", "事情", "这个", "那个"}:
-            return f"我平常{verb}什么{topic}？"
-    return query
-
-
-def trusted_previous_text(archive, agent_id, app_id, channel, host_context):
-    """宿主确认前驱关系；档案复核完整来源、版本、正文与真实窗口，不补造 epoch。"""
-    if not host_context:
-        return None
-    ref = host_context.get('previous_assistant_ref') or {}
-    if ((ref.get('agent_id'), ref.get('app_id'), ref.get('channel')) != (agent_id, app_id, channel)
-            or not host_context.get('conversation_id') or not host_context.get('current_epoch_id')):
-        return None
-    with closing(sqlite3.connect(archive.path)) as db:
-        db.row_factory = sqlite3.Row
-        row = db.execute("SELECT * FROM history_events WHERE app=? AND channel=? AND source_event_id=?",
-                         (app_id, channel, ref.get('source_event_id'))).fetchone()
-    if (row and not row['deleted'] and row['role'] == 'assistant'
-            and row['version'] == ref.get('version') and row['text'] == ref.get('text')
-            and row['text'] and row['conversation_id'] == host_context['conversation_id']
-            and row['epoch_id'] == host_context['current_epoch_id']):
-        return row['text']
-    return None
+def current_conversation_quote(query):
+    outside_quotes = re.sub(r'[“「"]([^”」"]+)[”」"]', '', query)
+    scope = r'(?:这(?:一)?(?:段|个|次|轮)|当前|本(?:次|段|轮)?)(?:对话|会话|聊天)'
+    outside_quotes = re.sub(r'(?:不限于?|不局限于|不限定在?|不只看)' + scope, '', outside_quotes)
+    return bool(re.search(scope, outside_quotes)
+                and ('原话' in outside_quotes or _asks_past_words(query) or _LAST_AGREEMENT.search(outside_quotes)
+                     or re.search(r'我.{0,12}提过.{0,8}(?:什么|啥)', outside_quotes)))
 
 
 def scoped_rows(path, app_id, channel, archive_path, agent_id):
@@ -168,20 +237,25 @@ def scoped_rows(path, app_id, channel, archive_path, agent_id):
         from thalemora.memory.extensions import scoped_extensions
         extensions = scoped_extensions(path, archive_path, agent_id, app_id, channel, connection=db)
     refs, states = {}, {}
+    revisions = {r['source_id']: r['provenance']['revision_id'] for r in memory_rows
+                 if 'extension_id' not in r['provenance']}
+    ids = {card_id for card_id, scope in scopes.items() if belongs(scope, app_id, channel)}
+    suppressed_raw = set()
     with closing(sqlite3.connect(archive_path)) as source_db:
         for item in evidence:
             card_id = item["card_id"]
             state = resolve_archive_evidence(source_db, item, agent_id, app_id, channel)
             key = state["source_key"]
-            if key is not None:
-                refs.setdefault(card_id, set()).add(key)
+            if key is not None and card_id in ids:
+                suppressed_raw.add(key)
+                if item['revision_id'] == revisions.get(card_id):
+                    refs.setdefault(card_id, set()).add(key)
             status = state["resolution"]
             if status == "manual_note" and (item["origin"], item["change_type"]) != ("manual_ui", "create"):
                 status = "unsupported"
             if status == "manual_revision" and (item["origin"], item["change_type"]) != ("manual_ui", "manual_edit"):
                 status = "unsupported"
             states.setdefault(item["revision_id"], []).append(status)
-    ids = {card_id for card_id, scope in scopes.items() if belongs(scope, app_id, channel)}
     by_extension = {e['extension_id']: e for e in extensions}
     unit_refs = {}
     for card_id in ids:
@@ -189,6 +263,7 @@ def scoped_rows(path, app_id, channel, archive_path, agent_id):
     for extension in extensions:
         key = f"memory:{extension['card_id']}:extension:{extension['extension_id']}"
         unit_refs[key] = {tuple(e['source_key']) for e in extension['evidence_refs'] if e['source_key']}
+        suppressed_raw.update(unit_refs[key])
     rows = []
     for row in memory_rows:
         extension_id = row['provenance'].get('extension_id')
@@ -202,7 +277,6 @@ def scoped_rows(path, app_id, channel, archive_path, agent_id):
             if row['source_id'] in ids and statuses and all(s in {'current', 'manual_note', 'manual_revision'} for s in statuses):
                 rows.append(row)
     # 历史/停用扩展也只抑制确切来源版本，不让原话兜底绕过停用。
-    suppressed_raw = set().union(*unit_refs.values()) if unit_refs else set()
     return rows, unit_refs, suppressed_raw
 
 
@@ -295,25 +369,49 @@ def archive_context(archive, app_id, channel, anchor):
 def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                     visible_memory_ids=(), visible_archive_ids=(), visible_texts=(), host_context=None,
                     legacy_graph_db_path=None, max_memory=None, max_archive=None,
-                    memory_rows=None, index_path=None, indexed_memory_rows=None):
+                    memory_rows=None, index_path=None, indexed_memory_rows=None, cards_only=False):
     archive = application.archive(agent_id, app_id, channel)  # 查询为空也必须先授权
-    if not isinstance(query, str) or len(query) > 200:
-        raise ValueError("本轮问题须为不超过 200 字符的文本")
+    if not isinstance(query, str) or len(query) > MAX_TURN_CHARS:
+        raise ValueError(f"本轮问题须为不超过 {MAX_TURN_CHARS} 字符的文本")
     bounded = max_memory is not None or max_archive is not None
     for limit in (max_memory, max_archive):
         if limit is not None and (type(limit) is not int or not 1 <= limit <= 2):
             raise ValueError("可信召回数量须为 1 或 2")
-    previous = trusted_previous_text(archive, agent_id, app_id, channel, host_context)
-    if previous is not None:
-        query = prior_assistant_query(query, previous)
-        visible_archive_ids = (*visible_archive_ids, host_context['previous_assistant_ref']['source_event_id'])
-        visible_texts = (*visible_texts, previous)
-    original = recover_original(archive, application, agent_id, app_id, channel, query,
-                                set(visible_archive_ids), visible_texts)
-    if original is not None:
-        return original
-    terms = query_terms(query)
     result = dict(rendered="", memories=[], archive=[], errors=[])
+    if preference_change(query) or (len(query) > 200 and preference_change(question_focus(query))):
+        result['preference_correction'] = True
+        return result
+    previous = trusted_previous_text(archive, agent_id, app_id, channel, host_context)
+    earlier = None
+    utterance = query
+    if previous is not None:
+        prior_ref = host_context['previous_assistant_ref']
+        user_ref = prior_ref.get('acknowledged_user_ref') or {}
+        if acknowledged_followup(query, previous) and user_ref.get('source_event_id') in visible_archive_ids:
+            earlier = trusted_previous_text(archive, agent_id, app_id, channel, host_context, role='user')
+        query = prior_assistant_query(query, earlier or previous)
+        visible_archive_ids = (*visible_archive_ids, prior_ref['source_event_id'])
+        visible_texts = (*visible_texts, previous)
+        if earlier is not None:
+            visible_texts = (*visible_texts, earlier)
+    if query == utterance and reference_request(query):
+        result['unresolved_reference'] = True
+        return result
+    scoped_quote = current_conversation_quote(query)
+    if (scoped_quote and previous is None) or (cards_only and original_quote_request(query)):
+        return result
+    original = recover_original(archive, application, agent_id, app_id, channel, query,
+                                set(visible_archive_ids), visible_texts,
+                                host_context['conversation_id'] if scoped_quote and previous is not None else None)
+    if original is not None:
+        if scoped_quote and trusted_previous_text(archive, agent_id, app_id, channel, host_context) != previous:
+            return result
+        return original
+    # 指定本人、时间或字面锚点的引语查证失败，普通相关资料不能替代原话。
+    if constrained_quote_request(query):
+        return result
+    focus = question_focus(query)
+    terms = query_terms(focus)
     if not terms:
         return result
     path = application.memory_path(agent_id, app_id, channel)
@@ -347,11 +445,11 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
         index = RetrievalIndex.open_read_only(str(index_path), memory_db_path=str(path),
                                              embedding_model=model_id, embedder=embedder)
         try:
-            candidates = index.search(query, top_k=24, pool=24, lexical_queries=terms)
+            candidates = index.search(focus, top_k=24, pool=24, lexical_queries=terms)
         except ProviderUnavailable as exc:
             embedding_warning(exc)
             index.embedder = None
-            candidates = index.search(query, top_k=24, pool=24, lexical_queries=terms)
+            candidates = index.search(focus, top_k=24, pool=24, lexical_queries=terms)
         read_rows = lambda: indexed_memory_rows(candidates, visible_archive_ids)
         rows, refs, suppressed_raw = read_rows()
     else:
@@ -361,7 +459,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
         rows, refs, suppressed_raw = read_rows()
         try:
             ensure_current_index(index, rows, embedder, expected_generation=expected)
-            candidates = index.search(query, top_k=12, pool=24, lexical_queries=terms) if rows else []
+            candidates = index.search(focus, top_k=12, pool=24, lexical_queries=terms) if rows else []
         except ProviderUnavailable as exc:
             embedding_warning(exc)
             # Re-read under a NEW fence: no stale vector/model reuse and no model retry.
@@ -369,10 +467,16 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
             expected = index._generation('memory_card')
             rows, refs, suppressed_raw = read_rows()
             ensure_current_index(index, rows, None, expected_generation=expected)
-            candidates = index.search(query, top_k=12, pool=24, lexical_queries=terms) if rows else []
+            candidates = index.search(focus, top_k=12, pool=24, lexical_queries=terms) if rows else []
     seen_cards, seen_raw = set(visible_memory_ids), set(visible_archive_ids)
-    texts = [normalized(t) for t in visible_texts if normalized(t)]
+    visible = [value for t in visible_texts if (value := normalized(t))]
+    texts = []
+
+    def already_present(text):
+        # 插件也会传入问题本身。主题词或一句“好”不能证明整条候选已经展示。
+        return any(text in t for t in visible) or any(text in t or t in text for t in texts)
     current = {r['source_key']: r for r in rows}
+    named_titles = separately_named_titles(focus, rows)
     pool = []
     asks_history = any(cue in query for cue in
                        ('之前', '以前', '上次', '那次', '当时', '还记得', '记不记得', '曾经'))
@@ -388,6 +492,10 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
 
     def has_chat_topic(row):
         if not short_chat:
+            return True
+        # 具体查问可由正文直接回答；单独一个情绪或动作词仍沿用标题/关键词限制。
+        if (topic_terms and re.search(r'哪|什么|谁|多少|几', query)
+                and all(t in row['text'].lower() for t in terms)):
             return True
         first_line = row['text'].partition('\n')[0]
         # 无标题旧卡保留以完整复合主题开头的召回，正文零散命中不足以选卡。
@@ -410,7 +518,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
         # 非宿主独立召回保持原有词面规则。
         lexical_allowed = lexical >= 0.5 if indexed_memory_rows is not None else bool(lexical)
         semantic_floor = 0.59 if indexed_memory_rows is not None and asks_history else 0.65
-        if (lexical_allowed or cosine >= semantic_floor) and has_chat_topic(row):
+        if (row.get('title') or '').strip() in named_titles or ((lexical_allowed or cosine >= semantic_floor) and has_chat_topic(row)):
             memory = dict(kind='memory', id=row['source_id'], text=row['text'],
                           source_key=row['source_key'], revision_id=row['provenance']['revision_id'],
                           score=max(lexical, cosine))
@@ -442,7 +550,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                          source_key=row['source_key'],
                          revision_id=row['provenance']['revision_id'], score=1.0))
     raw = {}
-    for term in terms if archive_allowed else ():
+    for term in terms if archive_allowed and not cards_only else ():
         for row in application.search(agent_id, app_id, term, channel, limit=12):
             raw[row["source_event_id"]] = row
     for source_id, row in raw.items():
@@ -454,14 +562,17 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
         # 与上面宿主 Memory 的最低词面覆盖率一致；独立产品原规则不变。
         if score > 0 and (indexed_memory_rows is None or score >= 0.5):
             pool.append(dict(kind="archive", id=source_id, version=row["version"], text=row["text"], score=score))
-    pool = [p for p in pool if not any(normalized(p["text"]) in t or t in normalized(p["text"]) for t in texts)]
+    pool = [p for p in pool if not already_present(normalized(p['text']))]
+    if named_titles and not bounded:
+        pool = [p for p in pool if p['kind'] == 'memory'
+                and current[p['source_key']]['title'].strip() in named_titles]
     pool.sort(key=lambda p: -p["score"])
     pool = pool[:12]
     if pool:
         try:
             rerank_id, reranker = configured_model(application.providers, "rerank")
             if reranker is not None:
-                scores = list(reranker(query, [p["text"] for p in pool]))
+                scores = list(reranker(focus, [p["text"] for p in pool]))
                 if len(scores) != len(pool) or any(not math.isfinite(float(s)) for s in scores):
                     raise ValueError("rerank 分数无效")
                 pool = [p for _, p in sorted(zip(scores, pool), key=lambda pair: -float(pair[0]))]
@@ -483,7 +594,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
             row = matches[0]
             if (row['source_id'] not in seen_cards
                     and not any(key[3] in seen_raw for key in refs.get(row['source_key'], ()))
-                    and not any(normalized(row['text']) in t or t in normalized(row['text']) for t in texts)):
+                    and not already_present(normalized(row['text']))):
                 pool.append(dict(kind='memory', id=row['source_id'], text=row['text'],
                                  source_key=row['source_key'],
                                  revision_id=row['provenance']['revision_id'], score=0.0))
@@ -499,7 +610,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                     if (row and row['text'] == item['text']
                             and row['provenance']['revision_id'] == item['revision_id']
                             and row['provenance'].get('extension_id') == item.get('extension_id')
-                            and has_chat_topic(row)
+                            and ((row.get('title') or '').strip() in named_titles or has_chat_topic(row))
                             and (indexed_memory_rows is None or not any(
                                 key[3] in seen_raw for key in refs.get(row['source_key'], ())))):
                         if 'extension_id' in item:
@@ -519,26 +630,56 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
     # Provider 等待期间前驱若已被修订/删除，不继续使用失效指代。
     if previous is not None and trusted_previous_text(archive, agent_id, app_id, channel, host_context) != previous:
         return result
+    if earlier is not None and trusted_previous_text(archive, agent_id, app_id, channel, host_context, role='user') != earlier:
+        return result
+    if named_titles and not bounded:
+        # 一对象一张当前卡；同名多张时不替用户消歧，也不将两张卡标成有事实关系。
+        selected = []
+        for title in named_titles:
+            matches = [item for item in pool if item['kind'] == 'memory'
+                       and current[item['source_key']]['title'].strip() == title]
+            if len(matches) == 1:
+                selected.extend(matches)
+        pool = selected
+    primary = next((item for item in pool if item['kind'] == 'memory'), None)
+    if primary and not bounded:
+        evidence = preference_evidence(archive, path, app_id, channel, query, primary)
+        if evidence is primary:
+            # 泛搜到的其他说话者、临时选择和早期引语不能充当当前习惯。
+            pool = [primary]
+        elif evidence is not None:
+            result['preference_correction'] = True
+            if not evidence:
+                return result
+            source = (agent_id, app_id, channel, evidence['id'], evidence['version'])
+            line = f"[用户原话 {evidence['id']} v{evidence['version']} {evidence['occurred_at']}] {evidence['text']}"
+            if (not cards_only and source not in suppressed_raw and evidence['id'] not in seen_raw
+                    and not already_present(normalized(evidence['text'])) and len(line) <= 700):
+                result.update(rendered=line, archive=[evidence])
+            return result
     lines = []
     for item in pool:
         key = "memories" if item["kind"] == "memory" else "archive"
         text = normalized(item["text"])
-        if (len(result[key]) >= ((max_memory if key == "memories" else max_archive) or 1)
-                or any(text in t or t in text for t in texts)):
+        if (len(result[key]) >= ((max_memory or len(named_titles) or 1) if key == "memories" else (max_archive or 1))
+                or already_present(text)):
             continue
         label = "记忆" if key == "memories" else ("历史记录" if original_quote_request(query) else "历史原话")
         if item.get('evidence_resolution') == 'legacy_unverified':
             label = '旧记忆候选，证据未核实'
         identity = (f"{item['id']} 扩展 {item['extension_id']} 基础修订 {item['base_revision_id']}"
                     if 'extension_id' in item else str(item['id']))
-        line = f"[{label} {identity}] {item['text'][:300]}"
+        fragment = excerpt(item['text'], terms)
+        if already_present(normalized(fragment)):
+            continue
+        line = f"[{label} {identity}] {fragment}"
         if len("\n".join([*lines, line])) > 700:
             continue
         lines.append(line)
         texts.append(text)
         result[key].append(item)
     result["rendered"] = "\n".join(lines)[:700]
-    if bounded:
+    if bounded or cards_only or named_titles:
         return result
     # 只补充本轮已复核的独立证据，不把检索相关性解释成事实关系。
     if (len(result['memories']) == 1
@@ -557,10 +698,10 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                     or {r[:4] for r in first_refs} & {r[:4] for r in second_refs}):
                 continue
             text = normalized(item['text'])
-            if any(text in t or t in text for t in texts):
+            if already_present(text):
                 continue
             line = (f"[独立来源未合并：记忆 {primary['id']} 修订 {primary['revision_id']}；"
-                    f"记忆 {item['id']} 修订 {item['revision_id']}] {item['text'][:300]}"
+                    f"记忆 {item['id']} 修订 {item['revision_id']}] {excerpt(item['text'], terms)}"
                     "（关联与冲突均未据此判定）")
             if len(result['rendered']) + 1 + len(line) <= 700:
                 result['rendered'] += '\n' + line
@@ -589,13 +730,13 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
                     or row['source_id'] in seen_cards or not first_refs or not second_refs
                     or {r[:4] for r in first_refs} & {r[:4] for r in second_refs}
                     or any(r[3] in seen_raw for r in second_refs)
-                    or any(text in t or t in text for t in texts)):
+                    or already_present(text)):
                 continue
             label = ('已记录关联候选' if relation['kind'] == 'stored_graph'
                      else '共享关键词派生候选（未保存关联图）')
             line = (f"[{label}：记忆 {primary['id']} "
                     f"修订 {primary['revision_id']}；记忆 {row['source_id']} "
-                    f"修订 {row['provenance']['revision_id']}] {row['text'][:300]}"
+                    f"修订 {row['provenance']['revision_id']}] {excerpt(row['text'], terms)}"
                     "（两条独立来源；尚未证实关系类型，不推断因果或合并事实）")
             if len(result['rendered']) + 1 + len(line) > 700:
                 continue
@@ -670,7 +811,7 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
             text = normalized(row['text'] or '')
             if (row['deleted'] or row['role'] not in {'user', 'assistant'} or not text
                     or source_key in suppressed_raw or row['source_event_id'] in seen_raw
-                    or any(text in t or t in text for t in texts)):
+                    or already_present(text)):
                 continue
             line = (f"[原话 {anchor['id']} ({role}) 的{direction} "
                     f"{row['source_event_id']} v{row['version']} ({row['role']})] {row['text']}")
@@ -684,16 +825,15 @@ def recall_for_turn(application, agent_id, app_id, query, channel="main", *,
     if statement(query) is not None:
         latest, latest_refs, _ = read_rows()
         hint = compare_statement(query, latest)
-        original_texts = [normalized(t) for t in visible_texts if normalized(t)]
         if hint:
             row = next(r for r in latest if r['source_id'] == hint['id'])
             if (not row['provenance'].get('legacy_unverified')
                     and row['source_id'] not in set(visible_memory_ids)
                     and not any(k[3] in set(visible_archive_ids)
                                 for k in latest_refs.get(row['source_key'], ()))
-                    and not any(normalized(row['text']) in t or t in normalized(row['text'])
+                    and not any(normalized(row['text']) in t
                                 or normalized(hint['old_statement']) in t
-                                for t in original_texts)):
+                                for t in visible)):
                 line = render_hint(hint)
                 rendered = '\n'.join(filter(None, (result['rendered'], line)))
                 if len(rendered) <= 700:

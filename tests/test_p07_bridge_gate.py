@@ -233,6 +233,33 @@ class BridgeGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             read_canonical_events_for_vnext(path, {'visible_raw_event_ids': [1] * 201})
 
+    def test_short_followup_only_uses_visible_user_immediately_before_ack(self):
+        self.card('shop', '云杉书屋的预订暗号是橙灯七号。')
+        path = Path(self.tmp.name) / 'runtime.sqlite'
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute('CREATE TABLE message_records(event_id,raw_event_id,role,content,'
+                       'epoch_id,status,kind,metadata_json)')
+            for key, raw, role, text in [('options', 71, 'user', '可以去松枝茶铺，或者去云杉书屋。'),
+                                         ('ack', 72, 'assistant', '好呀。')]:
+                db.execute("INSERT INTO message_records VALUES (?,?,?,?,'epoch','active','message','{}')",
+                           (key, raw, role, text))
+                event = self.event('canonical:' + key, text)
+                event.update(role=role, raw_event_id=raw, epoch_id='epoch')
+                self.app.import_history(self.agent, 'demo', [event])
+        def material(ids, **changes):
+            request = dict(user_text='后面那个怎么订？', previous_assistant_event_id='ack',
+                           current_epoch_id='epoch', visible_raw_event_ids=ids)
+            result = recall_vnext_from_runtime(self.app, self.agent, 'demo', request | changes, runtime_db_path=path)
+            return result['rendered']
+        self.assertIn('橙灯七号', material([71, 72]))
+        self.assertEqual('', material([72]))
+        self.assertEqual('', material([71, 72], current_epoch_id='other'))
+        # 一个后来修订的用户事件即使 ID 相同，也不能补造可信前文。
+        event = self.event('canonical:options', '我们改聊别的吧。', version=2)
+        event.update(role='user', raw_event_id=71, epoch_id='epoch')
+        self.app.import_history(self.agent, 'demo', [event])
+        self.assertEqual('', material([71, 72]))
+
     def test_canonical_source_verified_and_stale(self):
         row = self.event('canonical:evt-a', '青岚工程只能预览', version=3)
         row.update(raw_event_id=71, epoch_id='ep')

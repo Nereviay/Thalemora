@@ -102,13 +102,16 @@ class Application:
         from .maintenance import maintenance_status
         return maintenance_status(self, agent_id, app_id, channel, limit=limit)
 
-    def search(self, agent_id, app_id, query, channel="main", *, limit=20, offset=0):
+    def search(self, agent_id, app_id, query, channel="main", *, limit=20, offset=0, user_quotes=False, quote_role=None):
         """1–2 字符走 Btree 短 gram；更长原话查询沿用 FTS5 trigram。"""
         self.page(limit, offset)
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200:
             raise ValueError("词法查询须为 1..200 个字符")
         query = query.strip()
         archive = self.archive(agent_id, app_id, channel)
+        role = quote_role or ("user" if user_quotes else None)
+        quote_order = "AND h.role=? ORDER BY julianday(h.occurred_at) DESC, h.source_event_id "
+        role_args = (role,) if role else ()
         with closing(sqlite3.connect(archive.path)) as db:
             db.row_factory = sqlite3.Row
             if len(query) <= 2:
@@ -116,14 +119,14 @@ class Application:
                     "SELECT h.* FROM history_short_grams s CROSS JOIN history_events h "
                     "ON h.app=s.app AND h.channel=s.channel AND h.source_event_id=s.source_event_id "
                     "WHERE s.app=? AND s.channel=? AND s.gram=? AND h.deleted=0 "
-                    "ORDER BY s.source_event_id LIMIT ? OFFSET ?",
-                    (app_id, channel, query.lower(), limit, offset))
+                    + (quote_order if role else "ORDER BY s.source_event_id ") + "LIMIT ? OFFSET ?",
+                    (app_id, channel, query.lower(), *role_args, limit, offset))
             else:
                 rows = db.execute(
                     "SELECT h.* FROM history_fts f JOIN history_events h ON h.rowid=f.rowid "
                     "WHERE history_fts MATCH ? AND h.app=? AND h.channel=? AND h.deleted=0 "
-                    "ORDER BY h.source_event_id LIMIT ? OFFSET ?",
-                    ('"' + query.replace('"', '""') + '"', app_id, channel, limit, offset))
+                    + (quote_order if role else "ORDER BY h.source_event_id ") + "LIMIT ? OFFSET ?",
+                    ('"' + query.replace('"', '""') + '"', app_id, channel, *role_args, limit, offset))
             return [dict(row) for row in rows]
 
     @staticmethod
